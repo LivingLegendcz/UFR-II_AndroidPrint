@@ -1,0 +1,38 @@
+# ============================================================================
+#  UFR-II AndroidPrint — .gitignore
+# ============================================================================
+
+# --- Gradle / Android Studio / IDE ---
+.gradle/
+build/
+captures/
+local.properties
+.idea/
+*.iml
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# --- Build outputs (also bundle the Canon driver — never commit) ---
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ============================================================================
+#  Canon UFR-II driver — PROPRIETARY, NOT redistributed here.
+#  Download it yourself from Canon support and run scripts/build-bundle.sh.
+#  See README. (Canonův ovladač je proprietární — není součástí repa.)
+# ============================================================================
+linux-UFRII-drv-*.tar.gz
+linux-UFRII-drv-v630-m17n/
+
+# Generated root filesystem bundle — contains the Canon driver binaries.
+# Produced by scripts/build-bundle.sh.
+app/src/main/assets/rootfs.tar.gz
+app/src/main/assets/rootfs.tar
+app/src/main/assets/rootfs.version
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
