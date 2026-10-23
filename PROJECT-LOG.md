@@ -4,6 +4,72 @@ Chronologický log zjištění a rozhodnutí. Nejnovější nahoře v rámci dne
 
 ---
 
+## 2026-10-23 - ✅ v1.3.0 FINÁL — release pro rodinu
+
+- Testováno na S24+ (verze 1.2.0e → 1.3.0i): tisk, QR přenos nastavení ✅, kalibrace na jednom listu ✅.
+- **Remote Scanner na panelu drží tisk**: malá úloha se přijme celá a vytiskne až po ukončení skenování,
+  velká se zasekne. SNMP v tom režimu hlásí totéž co normálně (hrPrinterStatus=3, 77 hodnot Canon MIB
+  identických) → nejde poznat předem. Aplikace **nikdy neposílá znovu** (dvojí tisk); po odeslání hlídá
+  počítadlo stran (prtMarkerLifeCount) a při nečinnosti 25 s / zaseknutí 15 s ukáže „ukončete skenování“
+  a čeká (max 10 min). `StallRetry` v `PrintCancel.kt`.
+- Zrušit: `CancelToken` (ThreadLocal přes celou tiskovou cestu), proot `--kill-on-exit` (jinak filtr
+  přežil zabití proot a držel roury). Zrušit i z oznámení a ze systémové fronty.
+- Kalibrace: čísla pod šipkou v různé výšce, rub se znovu použije, návod v krocích + obrázek shora.
+- Onboarding: Telefon / Tiskárna, upozornění lze odmítnout; na šířku dvousloupcová Home.
+- Ikona aplikace vrácena na v1.1.1. PPD balík (Canon) je v .gitignore jako rootfs.
+- **Release APK `UFR-II-1.3.0.apk` (50 MB)** podepsaný lokálním debug klíčem (rozhodnutí uživatele:
+  instaluje se jako update přes testovací buildy). Klíč je jen ve WSL ~/.android/debug.keystore.
+
+## 2026-10-23 - 🔧 v1.3.0 — univerzální Canon UFR-II, IPv6, náhled skenu, QR sdílení (neověřeno na telefonu)
+
+- **Jiné modely**: všech 414 PPD jako `assets/ppd.zip` (bez překladů, 2,2 MB; výstup filtru shodný)
+  + `ppd-index.json` (`scripts/build-ppd-pack.py`). Model z MFNP `MDL:` / SNMP → `PpdCatalog.match`
+  (MDL „MF8000 Series“ = PPD přesně), ruční výběr Tiskárna → Ovladač. Per model: zásobníky (InputSlot
+  z PPD), CNColorMode jen kde je, `Duplex=DuplexNoTumble` u modelů s duplexní jednotkou (jinak ruční
+  duplex), výška rastru z ImageableArea (9 starších PPD 6733 řádků). Filtr přijal RGB 600 dpi u všech
+  414 PPD (amd64 test agenta); tisk na jiném HW neověřen.
+- **Sken**: název zařízení z `scanimage -L` (dřív napevno `pixma:MF8000_<ip>`); scanimage přestavěn
+  s `--enable-ipv6` (mfnp://[addr%ifindex], jméno pak podle MAC). Náhled skla 75 dpi, rámeček tahem,
+  automaticky podle předlohy (práh z jasu víka, přichycení k A4/A5/A6/B5 u značky), výchozí oblast
+  v Nastavení (celé sklo / formát / vlastní mm).
+- **IPv6**: tiskárna si pamatuje i IPv6; `PrinterAddress.resolve` — IPv4, při neodpovědi IPv6 (tisk,
+  sken, stav, systémový dialog). Hledání dává IPv4 + IPv6 jednoho stroje do jednoho záznamu.
+- **QR sdílení** nastavení tiskárny (adresy, model/PPD, schopnosti, kalibrace duplexu, možnosti skeneru,
+  výchozí volby): `ufrprint://import?d=…`, načtení Google code scannerem / odkazem / ze schránky.
+- Čerstvá instalace bez předvyplněné tiskárny. Release APK 50,6 MB (unsigned), debug 115 MB.
+- **1.3.0b** po testu 1.2.0e na S24+: glibc-static scanimage na telefonu **exit 159 = SIGSYS**
+  (seccomp; nejspíš rseq/clone3 z glibc 2.39) → sken nikdy neběžel. Nově NDK build proti bionicu
+  (`scripts/build-scanimage-android.sh`, --disable-pthread → fork, 490 kB). ADF se zjišťuje z
+  `scanimage -A` (podavač v nabídce) při testu spojení; IPv6 z mDNS (Android 14+ ServiceInfoCallback),
+  doplní se při testu; detail ukazuje IPv4 i IPv6.
+
+## 2026-10-23 - 🔧 Dieta A — velikost a paměť (neověřeno na telefonu)
+
+- Rootfs ořezán `scripts/trim-rootfs.sh` (volá ho build-bundle.sh): PPD jiných modelů (414), doc,
+  locale, cngplp2 GUI. Rozbalený 180 → 128 MB, `rootfs.tar.gz` 52 → 43 MB; release APK 56 → 48 MB.
+- Systémový dialog nehledá v síti, když existuje uložená tiskárna (dřív /24 scan při každém otevření);
+  oprava `DiscoveryEngine`: executor se vytváří při každém start() (dřív RejectedExecutionException).
+- Sken po sobě uklízí: stránky (až ~100 MB/str.) se mažou po zavření výsledku, výstupy v `cache/scan-out`
+  po 10 min (start aplikace: vše starší 1 h).
+- `CupsRasterWriter`: pásmové buffery (~13 MB) jednou na úlohu místo na každou stránku/kopii.
+- Vývojové sondy (`libtest_hello`, `libptraceprobe`, `spike/test-hello`) jen v debug source setu.
+- Etapa B (caepcm tabulky, gconv, ICU) čeká na trace skutečně otevíraných souborů filtrem.
+
+## 2026-10-23 - 🔧 v1.2.0 — zdroj papíru, ruční duplex, sken, notifikace (neověřeno na telefonu)
+
+- **Zdroj papíru**: PPD `InputSlot` (Auto / Manual / Cas1) do options filtru; driver ho čte
+  (`libcanonufr2r`, `cnpkmoduleufr2r`). Systémový dialog → „Další možnosti“ (`PrintOptionsActivity`,
+  advancedPrintOptionsActivity), v aplikaci obrazovka Tisk, výchozí v Nastavení.
+- **Ruční oboustranný tisk**: dialog nově nabízí Oboustranně (long edge) → dva průchody, mezi nimi
+  `DuplexGate` (notifikace s Pokračovat/Zrušit + celoobrazovkový návod v aplikaci). Kalibrace 1 listem
+  na tiskárnu × zásobník; výchozí odhad z dráhy papíru: kazeta lícem nahoru, ruční podavač lícem dolů,
+  hlavička napřed. Pořadí rubů podle (ne)otočení stohu, lichý počet → prázdná strana.
+- **Sken**: statický aarch64 `scanimage` (pixma + MF8000 patch, libjpeg 9f) jako `libscanimage.so`,
+  exec přímo bez proot (`scripts/build-scanimage-arm64.sh`). Sklo/podavač, barva/šedá/ČB, 150/300 dpi,
+  PDF/JPEG do Stažených, sdílení, „Vytisknout kopii“. ADF se ověří prvním úspěšným skenem.
+- Historie tisků/skenů, hlídání stavu tiskárny (WorkManager 15 min), úvodní průvodce, nová ikona + splash.
+- Unit testy 51/51 (nově DuplexPlanner, rozsah stránek). **Na zařízení zatím nic neověřeno.**
+
 ## 2026-10-23 - ✅ v1.1.1 — kopie opraveny (F2)
 
 - Test na S24+: `rastertoufr2` **ignoruje argv copies** (copies=2 → 1 list).
