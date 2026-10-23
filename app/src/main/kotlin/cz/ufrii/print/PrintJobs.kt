@@ -35,20 +35,43 @@ class PrintJobs(private val context: Context) {
 
     companion object {
         private val lock = Mutex()
+
+        /** The in-app job that is printing now ("Zrušit" on Home / Print / printer detail). */
+        @Volatile private var active: CancelToken? = null
+
+        /** Stops the running in-app job; false when nothing is printing. */
+        fun cancelActive(): Boolean {
+            val t = active ?: return false
+            AppLog.err("Tisk zrušen uživatelem")
+            t.cancel()
+            // A manual-duplex job may be waiting for the stack to be turned over.
+            DuplexGate.prompt.value?.let { DuplexGate.resolve(it.id, false) }
+            return true
+        }
+
+        private fun enterJob() = CancelToken().also { active = it; CancelToken.enter(it) }
+        private fun exitJob() { CancelToken.exit(); active = null }
     }
 
-    /** Prints a user file (PDF or image) from [uri]. */
+    /**
+     * Prints a user file (PDF or image) from [uri] with [opts]. [onProgress] gets
+     * (pass label or null, page index, page total) while pages are rendered.
+     */
     suspend fun printFile(
         uri: Uri,
         isImage: Boolean,
-        colorMode: ColorMode,
         printer: Printer,
-        copies: Int = 1
+        opts: PrintOptions,
+        title: String,
+        onProgress: (String?, Int, Int) -> Unit = { _, _, _ -> }
     ): JobResult = lock.withLock {
         withContext(Dispatchers.IO) {
+            val printer = PrinterAddress.resolve(context, printer)
+            enterJob()
             val t0 = System.currentTimeMillis()
             val tmpFile = File(context.cacheDir, "print_input.tmp")
-            AppLog.acc("Tisk ${if (isImage) "obrázku" else "PDF"} → ${printer.name} ${printer.ip}:${printer.port} ($colorMode)")
+            AppLog.acc("Tisk ${if (isImage) "obrázku" else "PDF"} → ${printer.name} ${printer.ip}:${printer.port} " +
+                "(${opts.colorMode}, ${opts.source.ppd}, kopie ${opts.copies}${if (opts.manualDuplex) ", oboustranně" else ""})")
             try {
                 val input = context.contentResolver.openInputStream(uri)
                     ?: return@withContext fail(t0, "Nelze otevřít soubor", "openInputStream($uri) == null")
@@ -56,27 +79,78 @@ class PrintJobs(private val context: Context) {
                 AppLog.i("Vstup zkopírován (${tmpFile.length()} B)")
 
                 val launcher = ProotLauncher(context)
-                val detail = if (isImage) {
-                    val bmp = decodeImage(tmpFile)
-                        ?: return@withContext fail(t0, "Obrázek nelze načíst", "BitmapFactory vrátil null")
-                    try {
-                        launcher.printImage(bmp, colorMode, printer.ip, printer.port)
-                    } finally {
-                        bmp.recycle()
+                val ppd = PpdCatalog.forPrinter(context, printer)
+                val detail = when {
+                    isImage -> {
+                        val bmp = decodeImage(tmpFile)
+                            ?: return@withContext fail(t0, "Obrázek nelze načíst", "BitmapFactory vrátil null")
+                        try {
+                            onProgress(null, 0, 1)
+                            StallRetry.run(context, title, printer.ip) {
+                                launcher.printImage(bmp, opts.colorMode, printer.ip, printer.port, opts.source, ppd)
+                            }
+                        } finally {
+                            bmp.recycle()
+                        }
                     }
-                } else {
-                    ParcelFileDescriptor.open(tmpFile, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                        launcher.printPdf(pfd, colorMode, printer.ip, printer.port, copies)
+                    opts.manualDuplex && !PpdCatalog.autoDuplex(context, printer) -> {
+                        var pass: String? = null
+                        ManualDuplexJob.run(context, tmpFile, printer, opts, title,
+                            onStatus = { pass = it },
+                            onPage = { i, n -> onProgress(pass, i, n) })
+                    }
+                    else -> StallRetry.run(context, title, printer.ip) {
+                        ParcelFileDescriptor.open(tmpFile, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                            launcher.printPdf(pfd, opts.colorMode, printer.ip, printer.port, opts.copies, opts.source,
+                                opts.pages, false, { i, n -> onProgress(null, i, n) }, ppd, duplex = opts.manualDuplex)
+                        }
                     }
                 }
-                finish(t0, detail)
+                finish(t0, detail, title, printer, opts.manualDuplex)
             } catch (e: Throwable) {
                 // Throwable: OutOfMemoryError on huge photos must not crash the app.
                 Log.e(TAG, "[job] failed", e)
-                fail(t0, "${e.javaClass.simpleName}: ${e.message}", e.stackTraceToString())
+                fail(t0, "${e.javaClass.simpleName}: ${e.message}", e.stackTraceToString(), title, printer)
             } finally {
                 // S2: don't leave the shared document in cache.
                 runCatching { tmpFile.delete() }
+                exitJob()
+            }
+        }
+    }
+
+    /** Number of pages of a PDF [uri] (null when it cannot be opened seekably). */
+    suspend fun pdfPageCount(uri: Uri): Int? = withContext(Dispatchers.IO) {
+        runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.let { pfd ->
+                android.graphics.pdf.PdfRenderer(pfd).use { it.pageCount }
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Duplex calibration, one sheet: [step] 1 prints side "1" on a blank sheet, step 2
+     * prints side "2" after the user re-inserted it as instructed.
+     */
+    suspend fun printCalibration(printer: Printer, source: PaperSource, step: Int, rotate180: Boolean = false): JobResult = lock.withLock {
+        withContext(Dispatchers.IO) {
+            val printer = PrinterAddress.resolve(context, printer)
+            enterJob()
+            val t0 = System.currentTimeMillis()
+            AppLog.acc("Kalibrace oboustranného tisku, krok $step → ${printer.name} (${source.ppd})")
+            try {
+                val detail = StallRetry.run(context, "Kalibrace", printer.ip) {
+                    ProotLauncher(context).printDrawn(
+                        listOf(ManualDuplexJob.calibrationPage(step, rotate180,
+                            context.getString(R.string.calib_page_label, step))), printer.ip, printer.port, source,
+                        PpdCatalog.forPrinter(context, printer))
+                }
+                finish(t0, detail, null, printer)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[job] calibration failed", e)
+                fail(t0, "${e.javaClass.simpleName}: ${e.message}", e.stackTraceToString())
+            } finally {
+                exitJob()
             }
         }
     }
@@ -84,6 +158,8 @@ class PrintJobs(private val context: Context) {
     /** Prints the bundled assets/sample.pdf test page. */
     suspend fun printTestPage(colorMode: ColorMode, printer: Printer): JobResult = lock.withLock {
         withContext(Dispatchers.IO) {
+            val printer = PrinterAddress.resolve(context, printer)
+            enterJob()
             val t0 = System.currentTimeMillis()
             val tmpFile = File(context.cacheDir, "sample_test.tmp")
             AppLog.acc("Testovací stránka → ${printer.name} ${printer.ip}:${printer.port} ($colorMode)")
@@ -91,15 +167,19 @@ class PrintJobs(private val context: Context) {
                 context.assets.open("sample.pdf").use { inp ->
                     tmpFile.outputStream().use { out -> inp.copyTo(out) }
                 }
-                val detail = ParcelFileDescriptor.open(tmpFile, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                    ProotLauncher(context).printPdf(pfd, colorMode, printer.ip, printer.port)
+                val detail = StallRetry.run(context, "sample.pdf", printer.ip) {
+                    ParcelFileDescriptor.open(tmpFile, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                        ProotLauncher(context).printPdf(pfd, colorMode, printer.ip, printer.port, 1, AppSettings.defaultSource.value,
+                            ppd = PpdCatalog.forPrinter(context, printer))
+                    }
                 }
-                finish(t0, detail)
+                finish(t0, detail, null, printer)
             } catch (e: Throwable) {
                 Log.e(TAG, "[job] test page failed", e)
                 fail(t0, "${e.javaClass.simpleName}: ${e.message}", e.stackTraceToString())
             } finally {
                 runCatching { tmpFile.delete() }
+                exitJob()
             }
         }
     }
@@ -111,11 +191,13 @@ class PrintJobs(private val context: Context) {
     suspend fun diagnostics(onStep: (Int, Int, String) -> Unit = { _, _, _ -> }): Unit = lock.withLock {
         withContext(Dispatchers.IO) {
             val launcher = ProotLauncher(context)
-            val steps: List<Pair<String, () -> String>> = listOf(
+            // The test binaries live in the debug source set only; a release build skips their steps.
+            val devProbes = File(context.applicationInfo.nativeLibraryDir, "libtest_hello.so").exists()
+            val steps: List<Pair<String, () -> String>> = listOfNotNull(
                 "Zařízení a knihovny" to launcher::diagnostics,
-                "Přímý exec" to launcher::runBinaryDirect,
-                "ptrace sonda (vývojová)" to launcher::runPtraceProbe,
-                "proot" to launcher::runProotTest,
+                ("Přímý exec" to launcher::runBinaryDirect).takeIf { devProbes },
+                ("ptrace sonda (vývojová)" to launcher::runPtraceProbe).takeIf { devProbes },
+                ("proot" to launcher::runProotTest).takeIf { devProbes },
                 "cnjbigufr2 (až 8 s)" to launcher::runCnjbigProbe
             )
             steps.forEachIndexed { i, (label, run) ->
@@ -131,24 +213,33 @@ class PrintJobs(private val context: Context) {
     // -------------------------------------------------------------------------
 
     /** Same success rule as CanonPrintService: filter exit 0 AND data delivered to the socket. */
-    private fun finish(t0: Long, detail: String): JobResult {
-        val ok = detail.contains("exitCode=0") && detail.contains("socket OK:")
+    private fun finish(t0: Long, detail: String, title: String?, printer: Printer, duplex: Boolean = false): JobResult {
+        // Manual duplex: every pass must succeed (each one logs its own exitCode / socket line).
+        val ok = ManualDuplexJob.allPassesOk(detail)
         val msg = if (ok) "OK" else shortReason(detail)
         if (ok) AppLog.ok("Vytištěno") else AppLog.err("Tisk selhal: $msg")
         AppLog.dim(detail)
+        if (title != null) {
+            JobHistory.add(context, HistoryEntry(System.currentTimeMillis(), title, printer.name, ok,
+                if (ok) "" else msg, HistoryEntry.VIA_APP, duplex))
+        }
         return JobResult(ok, msg, detail, System.currentTimeMillis() - t0)
     }
 
-    private fun fail(t0: Long, msg: String, detail: String): JobResult {
+    private fun fail(t0: Long, msg: String, detail: String, title: String? = null, printer: Printer? = null): JobResult {
         AppLog.err("Tisk selhal: $msg")
         AppLog.dim(detail)
+        if (title != null && printer != null) {
+            JobHistory.add(context, HistoryEntry(System.currentTimeMillis(), title, printer.name, false, msg,
+                HistoryEntry.VIA_APP))
+        }
         return JobResult(false, msg, detail, System.currentTimeMillis() - t0)
     }
 
     /** First meaningful failure line of a ProotLauncher summary. */
     private fun shortReason(detail: String): String =
         detail.lines().firstOrNull {
-            it.contains("Exception") || it.startsWith("FAIL") || it.contains("CHYBA") ||
+            it.contains("Exception") || it.contains("FAIL") || it.contains("CHYBA") ||
                 (it.contains("exitCode=") && !it.contains("exitCode=0"))
         }?.trim()?.take(160) ?: "Neznámá chyba"
 

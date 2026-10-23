@@ -64,6 +64,9 @@ class CanonPrintService : PrintService() {
     }
     private val jobClaims = ConcurrentHashMap<PrintJobId, JobClaim>()
 
+    // Running jobs: cancelling from the system print queue kills the filter and the socket.
+    private val jobTokens = ConcurrentHashMap<PrintJobId, CancelToken>()
+
     // -------------------------------------------------------------------------
     // Persistent file logger — writes timestamped lines to printservice.log
     // -------------------------------------------------------------------------
@@ -174,7 +177,15 @@ class CanonPrintService : PrintService() {
         }
         // Copies requested in the print dialog (F2) — PrintJobInfo.copies is >= 1.
         val copies = printJob.info.copies.coerceAtLeast(1)
-        svcLog("colorMode=$colorMode mediaSize=${attrs.mediaSize?.id} copies=$copies")
+        // Paper source from "More options" (PrintOptionsActivity), else the app default.
+        AppSettings.load(this)
+        val source = printJob.getAdvancedStringOption(ADV_INPUT_SLOT)?.let { PaperSource.fromPpd(it) }
+            ?: AppSettings.defaultSource.value
+        // Two-sided: the printer's duplex unit when the model has one, else manual duplex.
+        val duplex = attrs.duplexMode == PrintAttributes.DUPLEX_MODE_LONG_EDGE ||
+            attrs.duplexMode == PrintAttributes.DUPLEX_MODE_SHORT_EDGE
+        val title = printJob.document?.info?.name ?: "dokument"
+        svcLog("colorMode=$colorMode mediaSize=${attrs.mediaSize?.id} copies=$copies source=${source.ppd} duplex=$duplex")
 
         // 4. Media size validation (null → any size → allow through)
         val ms = attrs.mediaSize?.asPortrait()
@@ -205,6 +216,7 @@ class CanonPrintService : PrintService() {
         // 7. Submit to single-thread executor
         val claim = JobClaim(pfd)
         jobClaims[jobId] = claim
+        val token = CancelToken().also { jobTokens[jobId] = it }
         val future = printExecutor.submit {
             // Cancel-before-start already claimed the job and cleaned up → nothing to do.
             if (!claim.taken.compareAndSet(false, true)) return@submit
@@ -213,16 +225,38 @@ class CanonPrintService : PrintService() {
             // previously cancelled job — otherwise the new job's blocking I/O dies with
             // "read interrupted by closed() on another thread".
             Thread.interrupted()
+            CancelToken.enter(token)
             try {
-                Log.i(TAG, "[service] job=$jobId start print colorMode=$colorMode ip=${printer.ip}:${printer.port} copies=$copies")
-                svcLog("spouštím tisk → ${printer.ip}:${printer.port} colorMode=$colorMode copies=$copies")
-                val result = ProotLauncher(this).printPdf(pfd, colorMode, printer.ip, printer.port, copies)
+                // IPv4 first, the printer's IPv6 when IPv4 does not answer.
+                val target = PrinterAddress.resolve(this, printer)
+                Log.i(TAG, "[service] job=$jobId start print colorMode=$colorMode ip=${target.ip}:${target.port} copies=$copies")
+                svcLog("spouštím tisk → ${target.ip}:${target.port} colorMode=$colorMode copies=$copies")
+                val ppd = PpdCatalog.forPrinter(this, target)
+                val result = if (duplex && !PpdCatalog.autoDuplex(this, target)) {
+                    val pdfFile = File(cacheDir, "printjob_${jobId}.pdf")
+                    ManualDuplexJob.run(this, pdfFile, target, PrintOptions(colorMode, copies, source, true), title,
+                        onStatus = { pass ->
+                            if (Build.VERSION.SDK_INT >= 24) main.post {
+                                @Suppress("NewApi")
+                                printJob.setStatus("Oboustranně $pass — ${printer.name}" as CharSequence)
+                            }
+                        })
+                } else {
+                    // Waits for the page to come out (scan mode on the panel holds the job back).
+                    StallRetry.run(this, title, target.ip) {
+                        ProotLauncher(this).printPdf(pfd, colorMode, target.ip, target.port, copies, source,
+                            ppd = ppd, duplex = duplex)
+                    }
+                }
 
-                val ok = result.contains("exitCode=0") && result.contains("socket OK:")
+                val ok = ManualDuplexJob.allPassesOk(result)
                 val shortMsg = shortMsg(result)
                 Log.i(TAG, "[service] job=$jobId result ok=$ok shortMsg=$shortMsg")
                 svcLog("printPdf result:\n$result")
                 svcLog("ok=$ok")
+                JobHistory.add(this, HistoryEntry(System.currentTimeMillis(), title, printer.name, ok,
+                    if (ok) "" else shortMsg, HistoryEntry.VIA_SYSTEM, duplex))
+                Notifications.jobResult(this, title, ok, shortMsg)
 
                 main.post {
                     activeFutures.remove(jobId)
@@ -261,6 +295,8 @@ class CanonPrintService : PrintService() {
                     }
                 }
             } finally {
+                CancelToken.exit()
+                jobTokens.remove(jobId)
                 // S2: always close the fd and delete the spooled PDF — no document
                 // is left behind in cacheDir after the job finishes/fails/cancels.
                 try { pfd.close() } catch (e: Exception) {
@@ -280,6 +316,12 @@ class CanonPrintService : PrintService() {
     override fun onRequestCancelPrintJob(printJob: PrintJob) {
         val jobId = printJob.id
         Log.i(TAG, "[service] onRequestCancelPrintJob jobId=$jobId")
+        // Already printing: stop the filter and close the printer connection (and a manual-duplex
+        // wait for turning the stack over).
+        jobTokens.remove(jobId)?.let { t ->
+            t.cancel()
+            DuplexGate.prompt.value?.let { DuplexGate.resolve(it.id, false) }
+        }
         val future = activeFutures.remove(jobId)
         if (future != null) {
             // Use cancel(false) — cooperative cancel only.  We intentionally do NOT

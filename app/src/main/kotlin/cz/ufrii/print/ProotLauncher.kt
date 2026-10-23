@@ -22,6 +22,14 @@ enum class ColorMode { COLOR, MONO }
 
 class ProotLauncher(private val context: Context) {
 
+    private companion object {
+        /** No bytes to the filter or the printer for this long = the printer holds the job back (scan mode). */
+        const val STALL_MS = 15_000L
+        /** A stall this long ends the job (the printer is not going to take it). */
+        const val STALL_GIVE_UP_MS = 10 * 60_000L
+    }
+
+
     val nativeLibDir: File
         get() = File(context.applicationInfo.nativeLibraryDir)
 
@@ -200,6 +208,7 @@ class ProotLauncher(private val context: Context) {
      * stderr to a list.  Returns a human-readable summary string.
      *
      * @param colorMode  Selects the CUPS options string passed as filter arg #5.
+     * @param source     PPD InputSlot (Auto / Manual / Cas1), also in arg #5.
      * @param printerIp  Printer host.
      * @param port       Printer RAW port (9100).
      * @param copies     Passed verbatim as rastertoufr2 arg #4. NOTE: the filter
@@ -212,9 +221,12 @@ class ProotLauncher(private val context: Context) {
      */
     private fun runFilterPipeline(
         colorMode: ColorMode,
+        source: PaperSource,
         printerIp: String,
         port: Int,
         copies: Int,
+        ppd: PpdInfo = PpdCatalog.byFile(context, null),
+        duplex: Boolean = false,
         feed: (OutputStream) -> Unit
     ): String {
 
@@ -236,11 +248,21 @@ class ProotLauncher(private val context: Context) {
         val prootTmpDir = File(context.cacheDir, "proot_tmp").also { it.mkdirs() }
         val loaderBin = File(nativeLibDir, "libproot_loader.so")
 
-        val optionsStr = when (colorMode) {
-            ColorMode.COLOR ->
-                "finishings=3 number-up=1 print-color-mode=color CNColorMode=color CNDraftMode=False"
-            ColorMode.MONO ->
-                "finishings=3 number-up=1 print-color-mode=monochrome CNColorMode=mono CNDraftMode=False"
+        // Options only as this model's PPD offers them (an unknown InputSlot would silently fall
+        // back to Auto; CNColorMode is absent on mono models).
+        val color = colorMode == ColorMode.COLOR
+        val optionsStr = buildList {
+            add("finishings=3"); add("number-up=1")
+            add("print-color-mode=" + if (color) "color" else "monochrome")
+            if (ppd.colorModes.isNotEmpty()) add("CNColorMode=" + if (color && "color" in ppd.colorModes) "color" else "mono")
+            add("CNDraftMode=False")
+            add("InputSlot=" + if (source.ppd in ppd.slots) source.ppd else "Auto")
+            if (duplex && ppd.duplex) add("Duplex=DuplexNoTumble")
+        }.joinToString(" ")
+        val ppdPath = try {
+            PpdCatalog.guestPath(context, rootfsDir, ppd)
+        } catch (e: Exception) {
+            return "FAIL: PPD ${ppd.file}: ${e.message}"
         }
 
         val cmd = listOf(
@@ -252,6 +274,9 @@ class ProotLauncher(private val context: Context) {
             "-b", "/sys:/sys",
             "-b", "/system:/system",
             "--link2symlink",
+            // PTRACE_O_EXITKILL: killing proot (cancel, stall) also kills the filter it runs —
+            // otherwise the orphaned rastertoufr2 kept the pipes open and the job never ended.
+            "--kill-on-exit",
             "-w", "/",
             "/usr/lib/cups/filter/rastertoufr2",
             "1",                              // job-id
@@ -262,7 +287,7 @@ class ProotLauncher(private val context: Context) {
         )
 
         Log.i(TAG, "[filter] cmd: ${cmd.joinToString(" ")}")
-        Log.i(TAG, "[filter] colorMode=$colorMode printer=$printerIp:$port copies=$copies")
+        Log.i(TAG, "[filter] colorMode=$colorMode source=$source printer=$printerIp:$port copies=$copies ppd=${ppd.file} duplex=$duplex")
 
         val tStart = System.currentTimeMillis()
         return try {
@@ -287,10 +312,10 @@ class ProotLauncher(private val context: Context) {
                         put("LD_LIBRARY_PATH",
                             "/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib:/lib:/usr/lib/cups/filter")
                         // Guest env (paths inside rootfs)
-                        put("PPD", "/etc/cups/ppd/CanonMF8030.ppd")
+                        put("PPD", ppdPath)
                         put("CONTENT_TYPE", "application/vnd.cups-raster")
                         put("FINAL_CONTENT_TYPE", "application/vnd.cups-raster")
-                        put("PRINTER", "CanonMF8030")
+                        put("PRINTER", "Canon")
                         put("CUPS_DATADIR", "/usr/share/cups")
                         put("CUPS_SERVERROOT", "/etc/cups")
                         put("CUPS_SERVERBIN", "/usr/lib/cups")
@@ -308,6 +333,17 @@ class ProotLauncher(private val context: Context) {
             var rasterBytesFed = 0L
             var ufrBytesSent = 0L
             var socketResultMsg = "socket: nepřipojen"
+            val sockRef = AtomicReference<Socket?>(null)
+            // Bytes moved in either direction; the stall watchdog below watches it.
+            val progress = java.util.concurrent.atomic.AtomicLong(0)
+            val token = CancelToken.current()
+            token?.bind {
+                Log.i(TAG, "[filter] cancel requested — killing filter, closing socket")
+                process.destroyForcibly()
+                runCatching { sockRef.get()?.close() }
+                runCatching { process.outputStream.close() }
+                runCatching { process.inputStream.close() }
+            }
             val stderrLines = mutableListOf<String>()
             val feedError = AtomicReference<Throwable?>(null)
 
@@ -320,10 +356,12 @@ class ProotLauncher(private val context: Context) {
                         override fun write(b: Int) {
                             bos.write(b)
                             rasterBytesFed++
+                            progress.incrementAndGet()
                         }
                         override fun write(b: ByteArray, off: Int, len: Int) {
                             bos.write(b, off, len)
                             rasterBytesFed += len
+                            progress.addAndGet(len.toLong())
                         }
                         override fun flush() = bos.flush()
                         override fun close() = bos.close()
@@ -346,6 +384,7 @@ class ProotLauncher(private val context: Context) {
             val socketThread = Thread {
                 try {
                     val sock = Socket()
+                    sockRef.set(sock)
                     sock.connect(InetSocketAddress(printerIp, port), 5000)
                     Log.i(TAG, "[filter] socket connected $printerIp:$port")
                     sock.use { s ->
@@ -356,6 +395,7 @@ class ProotLauncher(private val context: Context) {
                                 while (pIn.read(buf).also { n = it } != -1) {
                                     sockOut.write(buf, 0, n)
                                     ufrBytesSent += n
+                                    progress.addAndGet(n.toLong())
                                 }
                                 sockOut.flush()
                             }
@@ -394,15 +434,41 @@ class ProotLauncher(private val context: Context) {
             socketThread.start()
             stderrThread.start()
 
-            val timedOut = !process.waitFor(120, TimeUnit.SECONDS)
+            // Stall watchdog: a printer that accepts the connection but takes no data (e.g. its
+            // panel is in Remote Scanner mode) blocks the socket write, then the filter, then the
+            // renderer. No bytes moving for STALL_MS → give up instead of hanging; the overall
+            // limit only guards against a runaway filter on huge jobs.
+            var stalled = false
+            var lastProgress = -1L
+            var lastMove = System.currentTimeMillis()
+            while (!process.waitFor(1, TimeUnit.SECONDS)) {
+                val now = System.currentTimeMillis()
+                val p = progress.get()
+                if (p != lastProgress) {
+                    lastProgress = p; lastMove = now
+                    StallRetry.setWaiting(context, null)
+                }
+                // Not taking data: tell the user what to do and keep the connection — the data flows
+                // again as soon as scanning ends on the panel. Only a very long stall ends the job.
+                if (now - lastMove > STALL_MS) StallRetry.setWaiting(context, StallRetry.current ?: "tisk")
+                if (now - lastMove > STALL_GIVE_UP_MS) { stalled = true; break }
+                if (now - tStart > 30 * 60_000L) break
+            }
+            StallRetry.setWaiting(context, null)
+            val timedOut = process.isAlive
             if (timedOut) {
                 process.destroyForcibly()
-                Log.w(TAG, "[filter] warn reason=timeout deadline_ms=120000")
+                runCatching { sockRef.get()?.close() }
+                Log.w(TAG, "[filter] warn reason=${if (stalled) "stalled" else "timeout"} raster=$rasterBytesFed ufr=$ufrBytesSent")
             }
+            token?.unbind()
 
-            feederThread.join(5000)
-            socketThread.join(10000)
-            stderrThread.join(5000)
+            // After a cancel / stall nothing useful is left to wait for.
+            val ended = token?.cancelled == true || stalled
+            if (ended) runCatching { process.outputStream.close() }
+            feederThread.join(if (ended) 1000 else 5000)
+            socketThread.join(if (ended) 1000 else 10000)
+            stderrThread.join(if (ended) 500 else 5000)
 
             val exitCode = if (timedOut) -1 else process.exitValue()
             val elapsedMs = System.currentTimeMillis() - tStart
@@ -418,6 +484,9 @@ class ProotLauncher(private val context: Context) {
 
             buildString {
                 appendLine("exitCode=$exitCode  elapsed=${elapsedMs}ms  timedOut=$timedOut")
+                if (token?.cancelled == true) appendLine("FAIL: zrušeno")
+                else if (stalled) appendLine("FAIL: tiskárna ${STALL_GIVE_UP_MS / 60_000} min nepřijímá data — nejspíš je " +
+                    "v režimu skenování (Remote Scanner) nebo zaneprázdněná.")
                 appendLine("--- raster generátor ---")
                 if (feederErr == null) {
                     appendLine("OK, $rasterBytesFed bajtů zapsáno (očekáváno $expectedRasterBytes na stránku)")
@@ -457,7 +526,7 @@ class ProotLauncher(private val context: Context) {
         if (!rasterFile.exists()) {
             return "FAIL: raster soubor nenalezen: ${rasterFile.absolutePath}"
         }
-        val result = runFilterPipeline(ColorMode.COLOR, printerIp, port, copies = 1) { out ->
+        val result = runFilterPipeline(ColorMode.COLOR, PaperSource.AUTO, printerIp, port, copies = 1) { out ->
             rasterFile.inputStream().use { it.copyTo(out) }
         }
         return buildString {
@@ -469,25 +538,32 @@ class ProotLauncher(private val context: Context) {
     /**
      * Renders a PDF (via [CupsRasterWriter.writePdf]) and prints it.
      * [pdfFd] must be seekable (open from a regular file, not a stream URI).
+     * [pages]/[rotate180] select one manual-duplex pass (see [DuplexPlanner]).
      */
     fun printPdf(
         pdfFd: ParcelFileDescriptor,
         colorMode: ColorMode,
         printerIp: String,
         port: Int,
-        copies: Int = 1
+        copies: Int = 1,
+        source: PaperSource = PaperSource.AUTO,
+        pages: List<Int>? = null,
+        rotate180: Boolean = false,
+        onPage: ((Int, Int) -> Unit)? = null,
+        ppd: PpdInfo = PpdCatalog.byFile(context, null),
+        duplex: Boolean = false
     ): String {
-        Log.i(TAG, "[filter] printPdf colorMode=$colorMode printer=$printerIp:$port copies=$copies")
+        Log.i(TAG, "[filter] printPdf colorMode=$colorMode source=$source printer=$printerIp:$port copies=$copies pages=${pages?.size ?: "all"}")
         // F2: the filter ignores argv copies → copies are rendered into the raster
         // stream instead, and the filter always gets 1 (no double multiplication).
-        val result = runFilterPipeline(colorMode, printerIp, port, copies = 1) { out ->
-            CupsRasterWriter(context).writePdf(out, pdfFd, copies) { rowsDone ->
-                Log.d(TAG, "[raster] pdf rows=$rowsDone")
-            }
+        val result = runFilterPipeline(colorMode, source, printerIp, port, copies = 1, ppd = ppd, duplex = duplex) { out ->
+            CupsRasterWriter(context, PageGeometry.fromArea(ppd.a4)).writePdf(out, pdfFd, copies, pages, rotate180, onPage,
+                progress = { rowsDone -> Log.v(TAG, "[raster] pdf rows=$rowsDone") }, padOdd = duplex && ppd.duplex)
         }
         return buildString {
             appendLine("=== TISK PDF (rastertoufr2) ===")
-            appendLine("colorMode=$colorMode  printer=$printerIp:$port  copies=$copies")
+            appendLine("colorMode=$colorMode  source=${source.ppd}  printer=$printerIp:$port  copies=$copies  ppd=${ppd.short}" +
+                if (duplex && ppd.duplex) "  duplex=auto" else "")
             append(result)
         }
     }
@@ -499,20 +575,36 @@ class ProotLauncher(private val context: Context) {
         bitmap: Bitmap,
         colorMode: ColorMode,
         printerIp: String,
-        port: Int
+        port: Int,
+        source: PaperSource = PaperSource.AUTO,
+        ppd: PpdInfo = PpdCatalog.byFile(context, null)
     ): String {
-        Log.i(TAG, "[filter] printImage colorMode=$colorMode printer=$printerIp:$port")
-        val result = runFilterPipeline(colorMode, printerIp, port, copies = 1) { out ->
-            CupsRasterWriter(context).writeImage(out, bitmap) { rowsDone ->
-                Log.d(TAG, "[raster] image rows=$rowsDone")
+        Log.i(TAG, "[filter] printImage colorMode=$colorMode source=$source printer=$printerIp:$port")
+        val result = runFilterPipeline(colorMode, source, printerIp, port, copies = 1, ppd = ppd) { out ->
+            CupsRasterWriter(context, PageGeometry.fromArea(ppd.a4)).writeImage(out, bitmap) { rowsDone ->
+                Log.v(TAG, "[raster] image rows=$rowsDone")
             }
         }
         return buildString {
             appendLine("=== TISK OBRÁZKU (rastertoufr2) ===")
-            appendLine("colorMode=$colorMode  printer=$printerIp:$port")
+            appendLine("colorMode=$colorMode  source=${source.ppd}  printer=$printerIp:$port")
             appendLine("obraz: ${bitmap.width}×${bitmap.height} px")
             append(result)
         }
+    }
+
+    /** Prints pages drawn on a Canvas (duplex calibration sheet), always mono. */
+    fun printDrawn(
+        drawPages: List<(android.graphics.Canvas) -> Unit>,
+        printerIp: String,
+        port: Int,
+        source: PaperSource,
+        ppd: PpdInfo = PpdCatalog.byFile(context, null)
+    ): String {
+        val result = runFilterPipeline(ColorMode.MONO, source, printerIp, port, copies = 1, ppd = ppd) { out ->
+            CupsRasterWriter(context, PageGeometry.fromArea(ppd.a4)).writeDrawn(out, drawPages)
+        }
+        return "=== TISK KALIBRACE (rastertoufr2) ===\nsource=${source.ppd}\n$result"
     }
 
     // -------------------------------------------------------------------------
