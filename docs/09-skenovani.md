@@ -1,5 +1,10 @@
 # 09 - Skenování (nice-to-have)
 
+> **UPDATE 2026-10-23: síťový sken OVĚŘEN na zařízení** (MFNP 8610, patch pixma, `auto_detection=no`,
+> nutný „Remote Scanner"). Aktuální stav a plán → **[docs/20](20-skenovani-navrh.md)**. Níže původní průzkum;
+> tvrzení „VueScan dokazuje síťový sken na Linuxu" se nepotvrdilo (stránka to nedokládá) — nahrazeno vlastním testem.
+> Tvrzení „bez ADF" níže je pro tento kus **chybné** — podavač má a sken z něj funguje (docs/20).
+
 > **Status: nice-to-have, NEplánováno aktivně.** Priorita je tisk. Sken je samostatný problém
 > (není symetrický s tiskem) a řešil by se až po dokončení tiskové části. Tento dokument
 > shrnuje průzkum (3 agenti, 2026-06-03), aby se nemuselo bádat znovu.

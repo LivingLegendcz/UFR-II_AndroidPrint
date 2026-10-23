@@ -4,6 +4,89 @@ Chronologický log zjištění a rozhodnutí. Nejnovější nahoře v rámci dne
 
 ---
 
+## 2026-10-23 - ✅ SÍŤOVÝ SKEN OVĚŘEN (fáze 0 GO)
+
+Reálný barevný sken 150 dpi z MF8030Cn po síti (WSL2, 12 s). Detail + plán: **[docs/20](docs/20-skenovani-navrh.md)**.
+- Protokol **MFNP UDP/TCP 8610** (ne BJNP); zařízení hlásí `MDL:MF8000 Series`.
+- **1řádkový patch** sane-backends 1.4.0 pixma (`"MF8000"` alias s PID MF8030) → model rozpoznán.
+- ⚠️ **Broadcast discovery zasekne UDP 8610 do restartu tiskárny** → `auto_detection=no`, jen unicast.
+- ⚠️ Bez **SCAN → Remote Scanner** na panelu → `EBUSY`; s ním sken projde.
+- Nástroje: `scripts/mfnp_probe.py` (unicast sonda), `scripts/sane-test-build.sh` (build + test sken).
+- Další: fáze 1 = arm64 build SANE do rootfs.
+- **Odpoledne doplněno:** opakované skeny bez restartu ✅ (Remote Scanner zapnout 1×). Visící relace →
+  JOB_DETAILS vrací chybu `0x8502` (SANE ji ignoruje) → **odblokování UDP `CLOSE` session 1, bez restartu** ✅.
+  **Podavač (ADF) funguje** ✅ (kus ADF má; patch s `PIXMA_CAP_ADF`), dávka 2 stran OK. Zaseknutý papír
+  SANE zacyklí → nutná úprava patche. Nový požadavek: volba zásobníku papíru pro tisk.
+
+## 2026-10-23 - 🔧 v1.1 build + review + opravy
+
+- Build ve WSL2 OK: `assembleRelease` (R8 minify/shrink prošel, **unsigned** 54 MB — chybí keystore),
+  `assembleDebug` 67 MB → zkopírováno jako **`UFR-1.1.apk`** (stejný debug podpis jako `UFR-1.0.apk`
+  → instalace jako update, data zůstanou).
+- Code review diffu v1.1 (agent): S1–S7, F1–F4 v pořádku; opraveno:
+  - **S4 revert** `AddPrinterActivity exported="true"` — print dialog „Přidat tiskárnu" spouští
+    printspooler (jiný UID) → s `false` by padal SecurityException. Aktivita nečte extras.
+  - **S2** cancel úlohy ještě ve frontě: `finally` se nespustí → `JobClaim` (AtomicBoolean) v
+    `CanonPrintService`, úklid pfd + PDF provede ten, kdo vyhraje (worker vs. cancel).
+  - **F1** dvojklik TISK při více tiskárnách → tlačítka disabled už při otevření výběru.
+- Otevřené z review (ověřit na zařízení): **F2 kopie** (header má NumCopies=1, options bez `copies=N`
+  → filtr možná tiskne 1×), OOM u 200MP fotek (`OutOfMemoryError` nechytán), feeder join 5 s,
+  `.gitattributes` (`*.sh`/`gradlew` eol=lf).
+
+## 2026-06-26 - 🛠️ v1.1 implementováno (security hardening + funkční opravy)
+
+Implementován celý balík **v1.1 (S1–S7)** + **v1.2 (F1–F5)** — kód hotový, **ověření na zařízení čeká**.
+Verze 1.0 → **1.1** (versionCode 11 → 12).
+Plný záznam session (rozhodnutí + zdůvodnění): **[docs/19-session-2026-06-26-v1.1.md](docs/19-session-2026-06-26-v1.1.md)**.
+
+**Security (z [docs/16](docs/16-security-audit.md)):**
+- **S1** release `signingConfig` (keystore z `local.properties`/env) + `isMinifyEnabled`+`isShrinkResources`
+  + nový `app/proguard-rules.pro` (keep commons-compress). README: release/keystore návod.
+- **S2** temp soubory mazány ve `finally` (MainActivity `print_input.tmp`/`sample_test.tmp`,
+  CanonPrintService `printjob_<id>.pdf`) + sweep sirotků v `onCreate`.
+- **S3+S7** `build-bundle.sh` → `https://` + dvoufázové stažení s SHA256 ověřením (fail-closed;
+  hashe doplnit jednorázově při dalším buildu), komentář o `+debXuY` procesu.
+- **S4** `AddPrinterActivity exported="false"` (⚠️ ověřit launch z Nastavení; jinak revert na true).
+- **S5** `allowBackup="false"`. **S6** rootfs + `extractAsset` permissions `(true,true)` owner-only.
+
+**Funkční (z [docs/17](docs/17-funkcni-review.md)):**
+- **F1** ProotLauncher odebrán default IP/port (vynucený explicitní); MainActivity `pickPrinter`
+  (1 → přímo, >1 → výběrový dialog) předává `printer.ip/port` do printPdf/printImage; mono-clamp
+  pro mono-only tiskárnu.
+- **F2** `printJob.info.copies` → argv #4 rastertoufr2 (bylo natvrdo "1"). Ověřit, že filtr kopie respektuje.
+- **F3** `androidx.exifinterface` → `applyExifRotation()` před printImage (fotky na výšku).
+- **F4** CupsRasterWriter `writePdf`/`writeImage` rotuje landscape o 90° místo letterboxu (~70 %).
+- **F5** printImage ověřit na zařízení společně s F3.
+
+**Build/ověření:** APK se sestavuje na WSL2 (SDK je tam, `local.properties` ukazuje na Linux cestu).
+Postup build + ověření → **[docs/18-v1.1-build-a-overeni.md](docs/18-v1.1-build-a-overeni.md)**.
+Po `assembleRelease` ověřit F1–F5 + S4 na S24+ s tiskárnou na WiFi. Změny zatím necommitnuté.
+Pozn.: rootfs.tar.gz z v1.0 platí dál — pro build APK není třeba `build-bundle.sh`.
+
+---
+
+## 2026-06-10 - 🔍 Funkční review v1.0
+
+Provedeno funkční review (včetně `CupsRasterWriter.kt`) → **[docs/17-funkcni-review.md](docs/17-funkcni-review.md)**.
+4 funkční chyby: **F1 share target ignoruje PrinterStore** (vždy hardcoded IP — nejzávažnější),
+F2 počet kopií se ignoruje (argv #4 vždy "1"), F3 EXIF rotace fotek, F4 landscape letterbox.
+Dále 5 UX vylepšení (v1.3) a v2.x roadmapa: formáty papíru přes patch headeru, 300 dpi draft,
+multi-model, **manuální duplex s kalibračním tiskem + instrukcí jak vrátit papír do zásobníku**,
+ověření/odstranění BJNP. TODO balíky v1.2/v1.3/v2.x níže.
+
+---
+
+## 2026-06-10 - 🔒 Security audit v1.0
+
+Proveden security audit celého projektu (manifest, 9 Kotlin souborů, build skripty) →
+**[docs/16-security-audit.md](docs/16-security-audit.md)**. Žádný kritický nález;
+3× střední (S1 debug build distribuce, S2 vytištěné PDF trvale v cache, S3 HTTP download
+bez checksumů v build-bundle.sh) + 4× nízká (S4 exported AddPrinterActivity, S5 allowBackup,
+S6 world-rwx rootfs, S7 patch proces bundled knihoven). Path-traversal guard, BIND_PRINT_SERVICE
+i .gitignore v pořádku. Opravy = nový balík **v1.1 hardening** v TODO níže.
+
+---
+
 ## 2026-06-05 - ✅ PHASE 3 GATE PASSED - fyzický tisk z holé APK
 
 **Výsledek:** `CanonPrint-0.3-phase3.apk` (~102 MB) fyzicky vytiskl barevnou i monochromatickou stránku na Canon i-SENSYS MF8030Cn. Žádný Termux, žádný root, žádný adb.
@@ -284,11 +367,46 @@ Paralelně lze (nezávisle na síti): skeleton appky + příprava bundle. Prerek
 - ✅ ~~**Fáze 3**~~ self-contained appka fyzicky tiskne barva i mono, S24+/Android 16 (2026-06-05).
 - ✅ ~~Doplnit `scripts/build-bundle.sh`~~ → sha256 verze, libxml2/ICU, libcupsstub, symlinky.
 
+**v1.1 — security hardening (z auditu [docs/16](docs/16-security-audit.md)) — KÓD HOTOV (ověření na zařízení čeká):**
+- [x] S1: Release signing config + `isMinifyEnabled=true` + `isShrinkResources=true`; distribuovat jen release. → build.gradle.kts + proguard-rules.pro.
+- [x] S2: Mazat temp soubory po jobu ve `finally` (`printjob_<id>.pdf`, `print_input.tmp`, `sample_test.tmp`); úklid sirotků v onCreate služby.
+- [x] S3: build-bundle.sh → `https://` mirror + SHA256 ověření každého .deb před extrakcí (fail-closed). ⚠️ hashe doplnit při dalším buildu.
+- [x] S4: `AddPrinterActivity` → `android:exported="false"`. ⚠️ ověřit, že launch z Nastavení nepadne (jinak revert).
+- [x] S5: `android:allowBackup="false"` v manifestu.
+- [x] S6: RootfsManager + extractAsset → owner-only permissions `(true, true)`.
+- [x] S7 (proces): komentář v build-bundle.sh o aktualizaci `+debXuY` verzí při rebuildu.
+
+**v1.2 — funkční opravy (z review [docs/17](docs/17-funkcni-review.md)) — KÓD HOTOV (ověření na zařízení čeká):**
+- [x] F1: Share target / TEST TISK → PrinterStore (`pickPrinter`, výběr při více tiskárnách); odstraněny default IP parametry z ProotLauncheru.
+- [x] F2: `printJob.info.copies` předáno jako argv #4 do rastertoufr2. ⚠️ ověřit, že filtr kopie respektuje (jinak fallback N× raster).
+- [x] F3: EXIF orientace fotek (`androidx.exifinterface` + `applyExifRotation` před tiskem).
+- [x] F4: Auto-rotace landscape stránek o 90° ve writePdf/writeImage (místo letterboxu).
+- [ ] F5: Fyzické ověření tisku obrázků (`printImage()`) — při testování s F3 na zařízení.
+
+**v1.3 — UX:**
+- [ ] U1: Fail-fast TCP pre-check tiskárny před spuštěním pipeline.
+- [ ] U2: `printJob.setProgress()` per stránka/band (row callback už existuje).
+- [ ] U3: `ACTION_SEND_MULTIPLE` — tisk více sdílených souborů sekvenčně.
+- [ ] U4: Rotace printservice.log (ponechat tail) místo smazání celého.
+- [ ] U5: Kooperativní abort běžícího jobu (flag v band loopu + zavření socketu).
+
+**v2.x — rozšíření:**
+- [ ] V1: Další formáty papíru — programový patch polí v header template (odemyká V2+V3).
+- [ ] V2: 300 dpi draft režim (4× menší raster, rychlejší tisk).
+- [ ] V3: Multi-model UFR-II — PPD per tiskárna místo hardcoded CanonMF8030.ppd.
+- [ ] V4: Manuální duplex průvodce — liché → dialog s instrukcí vrácení papíru do zásobníku (která strana nahoru, která hrana napřed) → sudé; orientaci NEhádat, určit jednorázovým kalibračním tiskem a uložit profil per tiskárna.
+- [ ] V5: BJNP discovery ověřit Wiresharkem proti reálné MF8030Cn, jinak prong C odstranit.
+  ⚠️ 2026-10-23: broadcast na 8610 zasekne skener do restartu ([docs/20](docs/20-skenovani-navrh.md)) — prong nesmí broadcastovat na 8610.
+- [ ] V6: Síťový sken — ✅ fáze 0 (ověřeno); fáze 1 arm64 SANE do rootfs → 2 runScan → 3 ScanActivity. Viz [docs/20](docs/20-skenovani-navrh.md).
+
 **Zbývající polish (open):**
-- [ ] Konfigurovatelná IP tiskárny (hardcoded `192.168.0.62`).
+- [ ] Konfigurovatelná IP tiskárny (hardcoded `192.168.0.62`). → řeší F1.
 - [ ] Zmenšení APK (~102 MB) - ořez caepcm, odstranění dev sond z release buildu.
-- [ ] Fyzické ověření tisku obrázků (`printImage()` implementováno, neověřeno).
+- [ ] ~~Fyzické ověření tisku obrázků~~ → přesunuto jako F5 do v1.2.
 - [ ] targetSdk 36/37 (Android 17 přidá `ACCESS_LOCAL_NETWORK`).
+- [ ] `PrinterStore.commit()` → `apply()`; regex validace IP/hostname; default IP jen v `PrinterStore`.
+- [ ] Unit testy: RootfsManager (traversal, version marker), PrinterStore.parseJson, shortMsg.
+- [ ] README: poznámka o plaintext :9100 a o tom, že TCP sken /24 na firemní síti spouští IDS.
 
 ---
 
