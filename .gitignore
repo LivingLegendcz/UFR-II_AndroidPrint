@@ -32,6 +32,9 @@ linux-UFRII-drv-v630-m17n/
 app/src/main/assets/rootfs.tar.gz
 app/src/main/assets/rootfs.tar
 app/src/main/assets/rootfs.version
+# PPDs of all Canon UFR-II models (Canon's files) — produced by scripts/build-ppd-pack.py.
+app/src/main/assets/ppd.zip
+app/src/main/assets/ppd-index.json
 
 # --- OS cruft ---
 .DS_Store

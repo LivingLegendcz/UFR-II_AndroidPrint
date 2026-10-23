@@ -277,6 +277,14 @@ else
   exit 1
 fi
 
+echo "=== [4a/5] PPD všech modelů jako samostatné assets (ppd.zip + ppd-index.json) ==="
+# Aplikace si vybere PPD podle modelu tiskárny a rozbalí ho do rootfs až při tisku;
+# rootfs tak PPD nenese (trim-rootfs.sh je smaže).
+python3 "$SCRIPT_DIR/build-ppd-pack.py" "$WORK_DIR/rootfs/usr/share/cups/model" "$OUT_DIR"
+
+echo "=== [4b/5] Ořezání nepotřebných dat ==="
+"$SCRIPT_DIR/trim-rootfs.sh" "$WORK_DIR/rootfs"
+
 echo "=== [5/5] Balení rootfs.tar.gz ==="
 tar -czf "$OUT_DIR/rootfs.tar.gz" -C "$WORK_DIR/rootfs" .
 SIZE=$(du -sh "$OUT_DIR/rootfs.tar.gz" | cut -f1)

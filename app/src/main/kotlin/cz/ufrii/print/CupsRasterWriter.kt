@@ -9,6 +9,7 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.OutputStream
+import kotlin.math.roundToInt
 
 private const val TAG = "CanonPrint"
 
@@ -29,7 +30,12 @@ private const val TAG = "CanonPrint"
  * fills a pre-allocated Bitmap with content for each band; this keeps Bitmap/Android
  * details out of the raster-assembly core.
  */
-class CupsRasterWriter(context: Context) {
+class CupsRasterWriter(context: Context, private val geometry: PageGeometry = PageGeometry.DEFAULT) {
+
+    /** Raster size of this printer model (A4 at 600 dpi; the printable area comes from its PPD). */
+    private val width = geometry.width
+    private val height = geometry.height
+    private val bytesPerLine = geometry.bytesPerLine
 
     // -------------------------------------------------------------------------
     // Public constants
@@ -63,7 +69,48 @@ class CupsRasterWriter(context: Context) {
             "cups_page_header_a4.bin has ${bytes.size} bytes, expected $HEADER_SIZE"
         }
         Log.d(TAG, "[raster] header template loaded size=$HEADER_SIZE")
+        if (!geometry.isDefault) patchGeometry(bytes)
         bytes
+    }
+
+    /**
+     * Writes this model's page size into the golden header (cups_page_header2_t, little-endian):
+     * ImagingBoundingBox, Margins, cupsWidth/Height/BytesPerLine and cupsImagingBBox. Everything
+     * else (RGB 8-bit chunky, 600 dpi, A4 PageSize) stays as the filter accepted it.
+     */
+    private fun patchGeometry(bytes: ByteArray) {
+        val a = geometry.area
+        val b = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        intArrayOf(a[0].roundToInt(), a[1].roundToInt(), a[2].roundToInt(), a[3].roundToInt())
+            .forEachIndexed { i, v -> b.putInt(284 + 4 * i, v) }      // ImagingBoundingBox
+        b.putInt(312, a[0].roundToInt()); b.putInt(316, a[1].roundToInt())   // Margins
+        b.putInt(372, width); b.putInt(376, height); b.putInt(392, bytesPerLine)
+        a.forEachIndexed { i, v -> b.putFloat(436 + 4 * i, v) }        // cupsImagingBBox
+        Log.i(TAG, "[raster] header geometry ${width}x$height area=${a.joinToString()}")
+    }
+
+    // -------------------------------------------------------------------------
+    // Band buffers (~13 MB together) — shared by all pages of one stream
+    // -------------------------------------------------------------------------
+
+    private var bandBitmap: Bitmap? = null
+    private var argbBuf: IntArray? = null
+    private var rgbBuf: ByteArray? = null
+
+    /** Bitmap width × BAND_ROWS (a partial last band also fits) + pixel/RGB arrays. */
+    private fun buffers(): Triple<Bitmap, IntArray, ByteArray> {
+        val bmp = bandBitmap ?: Bitmap.createBitmap(width, BAND_ROWS, Bitmap.Config.ARGB_8888).also { bandBitmap = it }
+        val argb = argbBuf ?: IntArray(width * BAND_ROWS).also { argbBuf = it }
+        val rgb = rgbBuf ?: ByteArray(width * BAND_ROWS * 3).also { rgbBuf = it }
+        return Triple(bmp, argb, rgb)
+    }
+
+    /** Frees the band buffers; the high-level writers call it when the stream is done. */
+    private fun release() {
+        bandBitmap?.recycle()
+        bandBitmap = null
+        argbBuf = null
+        rgbBuf = null
     }
 
     // -------------------------------------------------------------------------
@@ -82,11 +129,11 @@ class CupsRasterWriter(context: Context) {
     /**
      * Writes one complete raster page to [out]:
      *   1. The 1796-byte page-header template (verbatim copy from asset).
-     *   2. [CUPS_HEIGHT] rows of raw RGB pixels, produced band-by-band.
+     *   2. [height] rows of raw RGB pixels, produced band-by-band.
      *
      * @param out        Destination stream (no buffering needed; caller may wrap in BufferedOutputStream).
      * @param renderBand Callback invoked for each band.
-     *                   Contract: fill [dst] (a [Bitmap] of size CUPS_WIDTH × bandRows)
+     *                   Contract: fill [dst] (a [Bitmap] of size width × bandRows)
      *                   with the image content for rows [bandTopRow]..[bandTopRow+bandRows).
      *                   The bitmap is ARGB_8888; alpha is discarded when converting to RGB.
      * @param progress   Optional callback receiving cumulative rows written so far.
@@ -101,72 +148,65 @@ class CupsRasterWriter(context: Context) {
         out.write(headerTemplate)
         Log.d(TAG, "[raster] page header written size=$HEADER_SIZE")
 
-        // --- 2. Allocate reusable buffers (one set for the whole page) ---
-        // Bitmap: CUPS_WIDTH wide, BAND_ROWS tall (partial last band also fits).
-        val bandBitmap = Bitmap.createBitmap(CUPS_WIDTH, BAND_ROWS, Bitmap.Config.ARGB_8888)
-        val argbBuf = IntArray(CUPS_WIDTH * BAND_ROWS)
-        val rgbBuf  = ByteArray(CUPS_WIDTH * BAND_ROWS * 3)
+        // --- 2. Band buffers: allocated once per writer, reused by every page and copy ---
+        val (bandBitmap, argbBuf, rgbBuf) = buffers()
 
         var totalRowsWritten = 0
         var totalBytesWritten = 0L
 
-        try {
-            // --- 3. Band loop ---
-            var bandTop = 0
-            while (bandTop < CUPS_HEIGHT) {
-                val bandRows = minOf(BAND_ROWS, CUPS_HEIGHT - bandTop)
-                // bandRows may be < BAND_ROWS on the last (partial) band.
+        // --- 3. Band loop ---
+        var bandTop = 0
+        while (bandTop < height) {
+            val bandRows = minOf(BAND_ROWS, height - bandTop)
+            // bandRows may be < BAND_ROWS on the last (partial) band.
 
-                // 3a. Ask caller to fill the bitmap for this band.
-                val bandIndex = bandTop / BAND_ROWS
-                try {
-                    renderBand(bandTop, bandRows, bandBitmap)
-                } catch (t: Throwable) {
-                    throw RuntimeException(
-                        "render selhal: page=$pageIndex band=$bandIndex top=$bandTop: ${t.message}", t
-                    )
-                }
-
-                // 3b. Extract ARGB pixels from the bitmap.
-                //     Only the first bandRows*CUPS_WIDTH pixels are valid.
-                bandBitmap.getPixels(
-                    argbBuf,
-                    0,          // offset in argbBuf
-                    CUPS_WIDTH, // stride
-                    0, 0,       // x, y within bitmap
-                    CUPS_WIDTH,
-                    bandRows
+            // 3a. Ask caller to fill the bitmap for this band.
+            val bandIndex = bandTop / BAND_ROWS
+            try {
+                renderBand(bandTop, bandRows, bandBitmap)
+            } catch (t: Throwable) {
+                throw RuntimeException(
+                    "render selhal: page=$pageIndex band=$bandIndex top=$bandTop: ${t.message}", t
                 )
-
-                // 3c. Convert ARGB_8888 → RGB (drop alpha) into rgbBuf.
-                val pixelCount = bandRows * CUPS_WIDTH
-                var argbIdx = 0
-                var rgbIdx  = 0
-                while (argbIdx < pixelCount) {
-                    val px = argbBuf[argbIdx++]
-                    rgbBuf[rgbIdx++] = ((px shr 16) and 0xFF).toByte()  // R
-                    rgbBuf[rgbIdx++] = ((px shr  8) and 0xFF).toByte()  // G
-                    rgbBuf[rgbIdx++] = ( px         and 0xFF).toByte()  // B
-                }
-
-                // 3d. Write exactly bandRows * BYTES_PER_LINE bytes.
-                val bandBytes = bandRows * BYTES_PER_LINE
-                out.write(rgbBuf, 0, bandBytes)
-
-                totalRowsWritten  += bandRows
-                totalBytesWritten += bandBytes
-
-                progress?.invoke(totalRowsWritten)
-                Log.v(TAG, "[raster] band bandTop=$bandTop bandRows=$bandRows bandBytes=$bandBytes")
-
-                bandTop += bandRows
             }
-        } finally {
-            bandBitmap.recycle()
+
+            // 3b. Extract ARGB pixels from the bitmap.
+            //     Only the first bandRows*width pixels are valid.
+            bandBitmap.getPixels(
+                argbBuf,
+                0,          // offset in argbBuf
+                width, // stride
+                0, 0,       // x, y within bitmap
+                width,
+                bandRows
+            )
+
+            // 3c. Convert ARGB_8888 → RGB (drop alpha) into rgbBuf.
+            val pixelCount = bandRows * width
+            var argbIdx = 0
+            var rgbIdx  = 0
+            while (argbIdx < pixelCount) {
+                val px = argbBuf[argbIdx++]
+                rgbBuf[rgbIdx++] = ((px shr 16) and 0xFF).toByte()  // R
+                rgbBuf[rgbIdx++] = ((px shr  8) and 0xFF).toByte()  // G
+                rgbBuf[rgbIdx++] = ( px         and 0xFF).toByte()  // B
+            }
+
+            // 3d. Write exactly bandRows * bytesPerLine bytes.
+            val bandBytes = bandRows * bytesPerLine
+            out.write(rgbBuf, 0, bandBytes)
+
+            totalRowsWritten  += bandRows
+            totalBytesWritten += bandBytes
+
+            progress?.invoke(totalRowsWritten)
+            Log.v(TAG, "[raster] band bandTop=$bandTop bandRows=$bandRows bandBytes=$bandBytes")
+
+            bandTop += bandRows
         }
 
         // --- 4. Integrity check ---
-        val expectedBytes = CUPS_HEIGHT.toLong() * BYTES_PER_LINE
+        val expectedBytes = height.toLong() * bytesPerLine
         check(totalBytesWritten == expectedBytes) {
             "writePage: wrote $totalBytesWritten bytes, expected $expectedBytes"
         }
@@ -178,36 +218,53 @@ class CupsRasterWriter(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Renders every page of a PDF document to a CUPS Raster stream.
+     * Renders pages of a PDF document to a CUPS Raster stream.
      *
-     * Stream layout:  SYNC  [header + pixels] × numPages × copies
+     * Stream layout:  SYNC  [header + pixels] × pages × copies
      *
      * Each PDF page is scaled (preserving aspect ratio, white background) to fill
-     * CUPS_WIDTH × CUPS_HEIGHT.  Only the rows for the current band are rendered
+     * width × height.  Only the rows for the current band are rendered
      * per [PdfRenderer.Page.render] call using a translate matrix, avoiding
      * allocating a full-page bitmap.
      *
-     * @param out      Destination stream.
-     * @param pdfFd    ParcelFileDescriptor opened on the PDF file (read mode).
-     * @param copies   F2: rastertoufr2 ignores the copies argv (verified on device —
-     *                 copies=2 printed 1 sheet), so the whole document is emitted
-     *                 [copies]× in sequence → collated output (1,2,3,1,2,3).
-     * @param progress Optional row-progress callback (resets to 0 at each new page).
+     * @param out       Destination stream.
+     * @param pdfFd     ParcelFileDescriptor opened on the PDF file (read mode).
+     * @param copies    F2: rastertoufr2 ignores the copies argv (verified on device —
+     *                  copies=2 printed 1 sheet), so the selection is emitted
+     *                  [copies]× in sequence → collated output (1,2,3,1,2,3).
+     * @param pages     0-based page indexes in print order (null = all pages);
+     *                  -1 emits a blank page (manual duplex keeps sheets paired).
+     * @param rotate180 Render upside down (manual-duplex back sides, per calibration).
+     * @param onPage    Called before each emitted page with (index, total).
+     * @param progress  Optional row-progress callback (resets to 0 at each new page).
      */
     fun writePdf(
         out: OutputStream,
         pdfFd: ParcelFileDescriptor,
         copies: Int = 1,
-        progress: ((rowsDone: Int) -> Unit)? = null
+        pages: List<Int>? = null,
+        rotate180: Boolean = false,
+        onPage: ((done: Int, total: Int) -> Unit)? = null,
+        progress: ((rowsDone: Int) -> Unit)? = null,
+        padOdd: Boolean = false
     ) {
         writeStreamHeader(out)
 
-        PdfRenderer(pdfFd).use { renderer ->
+        try { PdfRenderer(pdfFd).use { renderer ->
             val pageCount = renderer.pageCount
-            Log.d(TAG, "[raster] pdf pageCount=$pageCount copies=$copies")
+            // Duplex unit + copies: an odd page count gets a blank back so each copy starts on a new sheet.
+            val selection = (pages ?: (0 until pageCount).toList()).filter { it < pageCount }
+                .let { if (padOdd && copies > 1 && it.size % 2 == 1) it + -1 else it }
+            val sequence = List(copies.coerceAtLeast(1)) { selection }.flatten()
+            Log.d(TAG, "[raster] pdf pageCount=$pageCount selection=${selection.size} copies=$copies rotate180=$rotate180")
 
-            for (copy in 0 until copies.coerceAtLeast(1))
-            for (pageIndex in 0 until pageCount) {
+            sequence.forEachIndexed { n, pageIndex ->
+                onPage?.invoke(n, sequence.size)
+                if (pageIndex < 0) {
+                    writePage(out, pageIndex = -1, renderBand = { _, _, bitmap -> bitmap.eraseColor(Color.WHITE) },
+                        progress = progress)
+                    return@forEachIndexed
+                }
                 renderer.openPage(pageIndex).use { page ->
                     // F4: landscape pages are rotated 90° to fill the portrait canvas
                     // instead of being letterboxed down to ~70 %.
@@ -220,16 +277,16 @@ class CupsRasterWriter(context: Context) {
                     val effH = if (landscape) page.width  else page.height
 
                     // Uniform scale so the (possibly rotated) page fits within CUPS canvas.
-                    val scale = minOf(CUPS_WIDTH.toFloat() / effW, CUPS_HEIGHT.toFloat() / effH)
+                    val scale = minOf(width.toFloat() / effW, height.toFloat() / effH)
 
                     // Center the scaled content on the canvas.
-                    val offsetX = (CUPS_WIDTH  - effW * scale) / 2f
-                    val offsetY = (CUPS_HEIGHT - effH * scale) / 2f
+                    val offsetX = (width  - effW * scale) / 2f
+                    val offsetY = (height - effH * scale) / 2f
 
                     writePage(out, pageIndex = pageIndex, renderBand = { bandTop, _, bitmap ->
                         val bandIndex = bandTop / BAND_ROWS
-                        // Matrix: (rotate 90° for landscape) → scale → translate so only the
-                        // current band is drawn at (0,0) in the bitmap.
+                        // Matrix: (rotate 90° for landscape) → scale → centre → (180° for
+                        // duplex backs) → translate so only the current band is drawn at (0,0).
                         val matrix = Matrix().apply {
                             if (landscape) {
                                 // 90° CW maps (x,y)→(-y,x); shift +page.height back into +x.
@@ -239,7 +296,9 @@ class CupsRasterWriter(context: Context) {
                             } else {
                                 setScale(scale, scale)
                             }
-                            postTranslate(offsetX, offsetY - bandTop)
+                            postTranslate(offsetX, offsetY)
+                            if (rotate180) postRotate(180f, width / 2f, height / 2f)
+                            postTranslate(0f, -bandTop.toFloat())
                         }
                         // Fill white background for this band.
                         bitmap.eraseColor(Color.WHITE)
@@ -259,14 +318,30 @@ class CupsRasterWriter(context: Context) {
                     }, progress = progress)
                 }
             }
-        }
+        } } finally { release() }
         Log.d(TAG, "[raster] writePdf complete")
+    }
+
+    /**
+     * Writes pages drawn directly on a full-page [Canvas] (calibration sheets). Each
+     * [drawPages] entry draws one page in raster pixel coordinates (4724 × 6780).
+     */
+    fun writeDrawn(out: OutputStream, drawPages: List<(Canvas) -> Unit>) {
+        writeStreamHeader(out)
+        try { drawPages.forEachIndexed { i, draw ->
+            writePage(out, pageIndex = i, renderBand = { bandTop, _, bitmap ->
+                bitmap.eraseColor(Color.WHITE)
+                val canvas = Canvas(bitmap)
+                canvas.translate(0f, -bandTop.toFloat())
+                draw(canvas)
+            })
+        } } finally { release() }
     }
 
     /**
      * Renders a single [Bitmap] (any size/aspect) to a one-page CUPS Raster stream.
      *
-     * The source image is scaled to fit within CUPS_WIDTH × CUPS_HEIGHT (preserving
+     * The source image is scaled to fit within width × height (preserving
      * aspect ratio) and centered on a white background.
      *
      * Stream layout:  SYNC  header + pixels
@@ -291,12 +366,12 @@ class CupsRasterWriter(context: Context) {
         val effH = if (landscape) bitmap.width  else bitmap.height
 
         // Uniform scale to fit within CUPS canvas.
-        val scale = minOf(CUPS_WIDTH.toFloat() / effW, CUPS_HEIGHT.toFloat() / effH)
+        val scale = minOf(width.toFloat() / effW, height.toFloat() / effH)
 
-        val offsetX = (CUPS_WIDTH  - effW * scale) / 2f
-        val offsetY = (CUPS_HEIGHT - effH * scale) / 2f
+        val offsetX = (width  - effW * scale) / 2f
+        val offsetY = (height - effH * scale) / 2f
 
-        writePage(out, renderBand = { bandTop, _, bandBitmap ->
+        try { writePage(out, renderBand = { bandTop, _, bandBitmap ->
             val canvas = Canvas(bandBitmap)
             canvas.drawColor(Color.WHITE)
 
@@ -311,7 +386,7 @@ class CupsRasterWriter(context: Context) {
                 postTranslate(offsetX, offsetY - bandTop)
             }
             canvas.drawBitmap(bitmap, matrix, null)
-        }, progress = progress)
+        }, progress = progress) } finally { release() }
 
         Log.d(TAG, "[raster] writeImage complete")
     }
