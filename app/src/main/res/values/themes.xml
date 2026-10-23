@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window theme for the Compose activities: no action bar, design bg (no white flash). -->
+    <style name="Theme.Ufr" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ufr_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <color name="ufr_bg">#F7F4EC</color>
+</resources>

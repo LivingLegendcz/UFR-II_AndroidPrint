@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Akce -->
+    <string name="action_add">Přidat</string>
+    <string name="action_cancel">Zrušit</string>
+    <string name="action_print">Tisknout</string>
+    <string name="action_save">Uložit</string>
+    <string name="action_show_log">Zobrazit log</string>
+    <string name="yes">ano</string>
+    <string name="no">ne</string>
+    <string name="unknown">nezjištěno</string>
+    <string name="copied">Zkopírováno: %1$s</string>
+
+    <!-- Popisky pro čtečku -->
+    <string name="cd_back">Zpět</string>
+    <string name="cd_settings">Nastavení</string>
+    <string name="cd_clear">Zavřít</string>
+    <string name="cd_add_printer">Přidat tiskárnu</string>
+    <string name="cd_search_again">Hledat znovu</string>
+    <string name="cd_refresh">Obnovit stav</string>
+    <string name="cd_edit">Upravit</string>
+    <string name="cd_copy_toner">Kopírovat název toneru</string>
+    <string name="cd_copy_log">Kopírovat log</string>
+
+    <!-- Hlavní -->
+    <string name="home_choose_file">Vybrat soubor</string>
+    <string name="home_choose_file_sub">Dokument nebo obrázek z telefonu</string>
+    <string name="home_test_page">Testovací stránka</string>
+    <string name="mode_color">Barevně</string>
+    <string name="mode_mono">Černobíle</string>
+    <string name="pending_pdf">PDF k tisku</string>
+    <string name="pending_image">Obrázek k tisku</string>
+    <string name="job_printing">Tisknu…</string>
+    <string name="job_done">Vytištěno</string>
+    <string name="job_failed">Tisk se nezdařil</string>
+
+    <!-- Karta tiskárny -->
+    <string name="hero_no_printer">Žádná tiskárna</string>
+    <string name="hero_no_printer_hint">Klepnutím přidáte tiskárnu</string>
+    <string name="state_loading">Zjišťuji stav</string>
+    <string name="state_ready">Připraveno</string>
+    <string name="state_toner_low">Dochází toner</string>
+    <string name="state_paper">Došel papír</string>
+    <string name="state_cover">Otevřený kryt</string>
+    <string name="state_jam">Zaseknutý papír</string>
+    <string name="state_down">Nedostupná</string>
+    <string name="hint_toner_low">%1$s toner na %2$d %%.</string>
+    <string name="hint_paper">Doplňte papír nebo zasuňte kazetu.</string>
+    <string name="hint_cover">Zavřete kryt tiskárny.</string>
+    <string name="hint_jam">Vyjměte zaseknutý papír podle displeje tiskárny.</string>
+    <string name="hint_down">Tiskárna neodpovídá. Je zapnutá a ve stejné Wi-Fi?</string>
+    <string name="toner_black">Černý</string>
+    <string name="toner_cyan">Azurový</string>
+    <string name="toner_magenta">Purpurový</string>
+    <string name="toner_yellow">Žlutý</string>
+    <string name="toner_other">Ostatní</string>
+
+    <!-- Tiskárny -->
+    <string name="printers_title">Tiskárny</string>
+    <string name="printers_empty">Zatím žádná uložená tiskárna.</string>
+    <string name="printers_searching">Hledám v síti</string>
+    <string name="printers_found">Nalezeno v síti</string>
+    <string name="printers_none_found">V síti jsem nic nenašel. Zkuste zadat IP ručně.</string>
+    <string name="printers_scan_note">Prohledávám místní síť přes mDNS a port 9100. Trvá to zhruba 20 sekund.</string>
+    <string name="printers_manual">Zadat IP ručně</string>
+    <string name="printer_default">výchozí</string>
+
+    <!-- Přidat tiskárnu -->
+    <string name="add_title">Přidat tiskárnu</string>
+    <string name="add_title_edit">Upravit tiskárnu</string>
+    <string name="field_name">Název</string>
+    <string name="field_ip">IP adresa</string>
+    <string name="field_ip_invalid">Neplatná IPv4 adresa nebo název</string>
+    <string name="field_port">Port</string>
+    <string name="add_test">Otestovat spojení</string>
+    <string name="add_testing">Zkouším spojení a zjišťuji, co tiskárna umí…</string>
+    <string name="add_reachable">Tiskárna odpovídá</string>
+    <string name="add_unreachable">Tiskárna neodpovídá. Zkontrolujte IP a že je zapnutá.</string>
+
+    <!-- Detail tiskárny -->
+    <string name="detail_toners">Tonery</string>
+    <string name="detail_inputs">Papír</string>
+    <string name="detail_caps">Co tiskárna umí</string>
+    <string name="detail_caps_unknown">Zatím nezjištěno — použijte „Znovu zjistit“.</string>
+    <string name="detail_set_default">Nastavit jako výchozí</string>
+    <string name="detail_redetect">Znovu zjistit schopnosti</string>
+    <string name="detail_remove">Odebrat tiskárnu</string>
+    <string name="detail_remove_q">Odebrat %1$s?</string>
+    <string name="input_manual">Ruční podavač</string>
+    <string name="input_cassette">Kazeta</string>
+    <string name="input_other">Zásobník</string>
+    <string name="input_has_paper">papír vložen</string>
+    <string name="input_empty">prázdný</string>
+    <string name="input_capacity">kapacita %1$d listů</string>
+    <string name="cap_model">Model</string>
+    <string name="cap_color">Barevný tisk</string>
+    <string name="cap_inputs">Zásobníky papíru</string>
+    <string name="cap_duplex">Oboustranný tisk</string>
+    <string name="cap_duplex_manual">Ručně s průvodcem (připravujeme)</string>
+    <string name="cap_scanner">Skener</string>
+    <string name="cap_adf">Podavač dokumentů</string>
+    <string name="cap_adf_later">Ověří se zkouškou s listem papíru (se skenováním)</string>
+    <string name="cap_pages">Vytištěno stran celkem</string>
+
+    <!-- Nastavení -->
+    <string name="settings_title">Nastavení</string>
+    <string name="settings_service">Tisková služba</string>
+    <string name="settings_service_sub">Zapnout UFR-II v systémovém Tisku</string>
+    <string name="settings_printers">Tiskárny</string>
+    <string name="settings_default_mode">Výchozí režim</string>
+    <string name="settings_appearance">Vzhled</string>
+    <string name="appearance_system">Podle systému</string>
+    <string name="appearance_light">Světlý</string>
+    <string name="appearance_dark">Tmavý</string>
+    <string name="settings_advanced">Pokročilé</string>
+    <string name="settings_log">Log a diagnostika</string>
+    <string name="settings_env">Tiskové prostředí</string>
+    <string name="settings_disclaimer">Nezávislá integrace, bez vazby na Canon Inc.</string>
+
+    <!-- Log -->
+    <string name="log_title">Log</string>
+    <string name="log_filter_app">Aplikace</string>
+    <string name="log_filter_errors">Chyby</string>
+    <string name="log_filter_service">Tisková služba</string>
+    <string name="log_empty">Zatím prázdné.</string>
+    <string name="log_copied">Log zkopírován</string>
+    <string name="log_diagnostics">Diagnostika</string>
+    <string name="log_clear">Smazat</string>
+    <string name="home_scan">Skenovat</string>
+    <string name="home_scan_sub">Připravujeme · sklo i podavač</string>
+    <string name="scan_coming">Síťový sken z MF8030Cn je ověřený (sklo i podavač dokumentů) a přidáme ho v další etapě. Výsledek půjde uložit jako PDF nebo sdílet.</string>
+    <string name="unsupported_title">Tento formát neumím vytisknout přímo</string>
+    <string name="unsupported_body">Otevřete soubor v aplikaci, která ho umí zobrazit (Word, Tabulky, LibreOffice…), a zvolte Tisk → UFR-II. Tisk projde přes tuto aplikaci.</string>
+    <string name="unsupported_open">Otevřít v aplikaci</string>
+    <string name="detail_toner_note">Hladiny hlásí tiskárna. U tohoto modelu mohou být jen orientační (dlouho 100 %, pak skok).</string>
+    <string name="detail_detected_at">Zjištěno %1$s</string>
+    <string name="detail_redetecting">Zjišťuji schopnosti…</string>
+    <string name="log_copied_what">Zkopírováno: %1$s · %2$d řádků</string>
+    <string name="log_diag_step">Krok %1$d/%2$d · %3$s</string>
+</resources>

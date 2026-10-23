@@ -446,10 +446,12 @@ class DiscoveryEngine(private val ctx: Context) {
     fun start(onFound: (Printer) -> Unit) {
         stopped = false
         reported.clear()
-        Log.i(TAG, "[disc] start — launching prongs A (mDNS), B (TCP scan), C (BJNP)")
+        Log.i(TAG, "[disc] start — launching prongs A (mDNS), B (TCP scan); C (BJNP) disabled")
         startNsdDiscovery(onFound)
         startTcpScan(onFound)
-        startBjnpDiscovery(onFound)
+        // Prong C (BJNP broadcast) is intentionally NOT started: a broadcast on UDP 8610
+        // wedges the MF8030Cn scanner stack until power-cycle (docs/20, Gotcha 1), and the
+        // device never answered BJNP anyway. Kept in code for reference only.
     }
 
     /**

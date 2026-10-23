@@ -1,6 +1,7 @@
 package cz.ufrii.print
 
 import android.content.Context
+import cz.ufrii.print.status.PrinterCapabilities
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -20,7 +21,9 @@ data class Printer(
     val port: Int = 9100,
     val colorCapable: Boolean = true,
     val source: PrinterSource = PrinterSource.MANUAL,
-    val model: String = "Canon MF8030Cn"
+    val model: String = "Canon MF8030Cn",
+    /** D1: what the device can do (SNMP + MFNP probe), null until "Otestovat spojení" ran. */
+    val capabilities: PrinterCapabilities? = null
 )
 
 // ---------------------------------------------------------------------------
@@ -39,6 +42,7 @@ object PrinterStore {
 
     private const val PREFS_NAME = "canon_printers"
     private const val KEY_LIST   = "manual_printers"
+    private const val KEY_DEFAULT = "default_printer_id"
 
     // -----------------------------------------------------------------------
     // Public API
@@ -78,7 +82,18 @@ object PrinterStore {
     /** Serialize [list] and commit to SharedPreferences. */
     fun saveManual(ctx: Context, list: List<Printer>) {
         val json = serializeJson(list)
-        prefs(ctx).edit().putString(KEY_LIST, json).commit()
+        prefs(ctx).edit().putString(KEY_LIST, json).apply()
+    }
+
+    /** The printer used by the in-app print paths: the chosen default, else the first one. */
+    fun defaultPrinter(ctx: Context): Printer? {
+        val list = loadManual(ctx)
+        val id = prefs(ctx).getString(KEY_DEFAULT, null)
+        return list.firstOrNull { it.id == id } ?: list.firstOrNull()
+    }
+
+    fun setDefault(ctx: Context, id: String) {
+        prefs(ctx).edit().putString(KEY_DEFAULT, id).apply()
     }
 
     /** Append [p] to the persisted list. */
@@ -124,6 +139,7 @@ object PrinterStore {
             obj.put("colorCapable", p.colorCapable)
             obj.put("source",       p.source.name)
             obj.put("model",        p.model)
+            p.capabilities?.let { obj.put("capabilities", it.toJson()) }
             arr.put(obj)
         }
         return arr.toString()
@@ -152,7 +168,8 @@ object PrinterStore {
                         PrinterSource.MANUAL
                     }
                     val model = obj.optString("model", "Canon MF8030Cn")
-                    result.add(Printer(id, name, ip, port, colorCapable, source, model))
+                    val caps = obj.optJSONObject("capabilities")?.let { PrinterCapabilities.fromJson(it) }
+                    result.add(Printer(id, name, ip, port, colorCapable, source, model, caps))
                 } catch (_: Exception) {
                     // Skip malformed entry
                 }

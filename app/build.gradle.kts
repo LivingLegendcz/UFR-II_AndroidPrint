@@ -32,8 +32,8 @@ android {
         applicationId = "cz.ufrii.print"
         minSdk = 29
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.1.1"
+        versionCode = 15
+        versionName = "1.2.0-d1b"
     }
 
     signingConfigs {
@@ -82,6 +82,14 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    // D1: Jetpack Compose UI (docs/design). Compiler 1.5.15 ↔ Kotlin 1.9.25.
+    buildFeatures {
+        compose = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.15"
+    }
 }
 
 dependencies {
@@ -89,4 +97,20 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("org.apache.commons:commons-compress:1.26.2")
+
+    // Compose
+    implementation(platform("androidx.compose:compose-bom:2024.09.03"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.navigation:navigation-compose:2.8.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+
+    testImplementation("junit:junit:4.13.2")
 }
