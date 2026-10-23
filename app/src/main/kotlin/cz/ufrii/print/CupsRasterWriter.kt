@@ -180,7 +180,7 @@ class CupsRasterWriter(context: Context) {
     /**
      * Renders every page of a PDF document to a CUPS Raster stream.
      *
-     * Stream layout:  SYNC  [header + pixels] × numPages
+     * Stream layout:  SYNC  [header + pixels] × numPages × copies
      *
      * Each PDF page is scaled (preserving aspect ratio, white background) to fill
      * CUPS_WIDTH × CUPS_HEIGHT.  Only the rows for the current band are rendered
@@ -189,19 +189,24 @@ class CupsRasterWriter(context: Context) {
      *
      * @param out      Destination stream.
      * @param pdfFd    ParcelFileDescriptor opened on the PDF file (read mode).
+     * @param copies   F2: rastertoufr2 ignores the copies argv (verified on device —
+     *                 copies=2 printed 1 sheet), so the whole document is emitted
+     *                 [copies]× in sequence → collated output (1,2,3,1,2,3).
      * @param progress Optional row-progress callback (resets to 0 at each new page).
      */
     fun writePdf(
         out: OutputStream,
         pdfFd: ParcelFileDescriptor,
+        copies: Int = 1,
         progress: ((rowsDone: Int) -> Unit)? = null
     ) {
         writeStreamHeader(out)
 
         PdfRenderer(pdfFd).use { renderer ->
             val pageCount = renderer.pageCount
-            Log.d(TAG, "[raster] pdf pageCount=$pageCount")
+            Log.d(TAG, "[raster] pdf pageCount=$pageCount copies=$copies")
 
+            for (copy in 0 until copies.coerceAtLeast(1))
             for (pageIndex in 0 until pageCount) {
                 renderer.openPage(pageIndex).use { page ->
                     // F4: landscape pages are rotated 90° to fill the portrait canvas

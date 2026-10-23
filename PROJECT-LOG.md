@@ -4,6 +4,13 @@ Chronologický log zjištění a rozhodnutí. Nejnovější nahoře v rámci dne
 
 ---
 
+## 2026-10-23 - ✅ v1.1.1 — kopie opraveny (F2)
+
+- Test na S24+: `rastertoufr2` **ignoruje argv copies** (copies=2 → 1 list).
+- Oprava: `CupsRasterWriter.writePdf(copies)` zapíše celý dokument N× za sebou (kompletované 1-2-1-2),
+  filtr dostává vždy 1. Ověřeno: strany 1–2 × 2 kopie → 4 listy ve správném pořadí (raster 384 MB, 5,4 s).
+- Verze 1.1.1 (code 13). Kopie sdílení/TEST TISK zůstávají 1 (kopie jen ze systémového dialogu).
+
 ## 2026-10-23 - ✅ SÍŤOVÝ SKEN OVĚŘEN (fáze 0 GO)
 
 Reálný barevný sken 150 dpi z MF8030Cn po síti (WSL2, 12 s). Detail + plán: **[docs/20](docs/20-skenovani-navrh.md)**.

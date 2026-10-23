@@ -202,7 +202,9 @@ class ProotLauncher(private val context: Context) {
      * @param colorMode  Selects the CUPS options string passed as filter arg #5.
      * @param printerIp  Printer host.
      * @param port       Printer RAW port (9100).
-     * @param copies     Number of copies — passed verbatim as rastertoufr2 arg #4.
+     * @param copies     Passed verbatim as rastertoufr2 arg #4. NOTE: the filter
+     *                   ignores it (1 sheet printed for copies=2) — callers render
+     *                   copies into the raster stream and pass 1 here.
      * @param feed       Called on the feeder thread; should write raster bytes to
      *                   [OutputStream] and return when done (or throw on error).
      *                   The stream is wrapped in BufferedOutputStream; it is
@@ -476,8 +478,10 @@ class ProotLauncher(private val context: Context) {
         copies: Int = 1
     ): String {
         Log.i(TAG, "[filter] printPdf colorMode=$colorMode printer=$printerIp:$port copies=$copies")
-        val result = runFilterPipeline(colorMode, printerIp, port, copies) { out ->
-            CupsRasterWriter(context).writePdf(out, pdfFd) { rowsDone ->
+        // F2: the filter ignores argv copies → copies are rendered into the raster
+        // stream instead, and the filter always gets 1 (no double multiplication).
+        val result = runFilterPipeline(colorMode, printerIp, port, copies = 1) { out ->
+            CupsRasterWriter(context).writePdf(out, pdfFd, copies) { rowsDone ->
                 Log.d(TAG, "[raster] pdf rows=$rowsDone")
             }
         }
