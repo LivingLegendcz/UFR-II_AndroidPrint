@@ -12,11 +12,14 @@ import android.os.Looper
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.LinkedBlockingQueue
@@ -41,8 +44,8 @@ class DiscoveryEngine(private val ctx: Context) {
     // State shared between prongs
     // -------------------------------------------------------------------------
 
-    /** Set of "ip:port" strings already reported — prevents duplicate callbacks. */
-    private val reported = ConcurrentHashMap<String, Boolean>()
+    /** "ip:port" → what was reported for it (merged: real mDNS name, IPv6 added later). */
+    private val reported = ConcurrentHashMap<String, Printer>()
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -137,7 +140,32 @@ class DiscoveryEngine(private val ctx: Context) {
         }
     }
 
+    /** Android 14+ address callbacks, unregistered in [stopNsdDiscovery]. */
+    private val infoCallbacks = mutableListOf<NsdManager.ServiceInfoCallback>()
+
     private fun doResolve(info: NsdServiceInfo, onFound: (Printer) -> Unit) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            // Keeps reporting as IPv4 and IPv6 records arrive (resolveService stops at one address).
+            val cb = object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    Log.w(TAG, "[disc/mdns] info callback failed name=${info.serviceName} code=$errorCode")
+                }
+                override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
+                    if (!stopped) handleResolvedService(serviceInfo, onFound)
+                }
+                override fun onServiceLost() {}
+                override fun onServiceInfoCallbackUnregistered() {}
+            }
+            try {
+                nsdManager.registerServiceInfoCallback(info, java.util.concurrent.Executors.newSingleThreadExecutor(), cb)
+                synchronized(infoCallbacks) { infoCallbacks.add(cb) }
+            } catch (e: Exception) {
+                Log.e(TAG, "[disc/mdns] registerServiceInfoCallback threw: ${e.message}")
+            }
+            synchronized(this) { resolveInFlight = false }
+            drainResolveQueue(onFound)
+            return
+        }
         val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "[disc/mdns] resolveFailed name=${serviceInfo.serviceName} code=$errorCode")
@@ -161,8 +189,13 @@ class DiscoveryEngine(private val ctx: Context) {
     }
 
     private fun handleResolvedService(serviceInfo: NsdServiceInfo, onFound: (Printer) -> Unit) {
-        val host: InetAddress = serviceInfo.host ?: return
-        val ip = host.hostAddress ?: return
+        // One machine, both address families: print to IPv4 (the scanner protocol and most
+        // firmware is IPv4-only), keep IPv6 for display. Android 14+ lists every address.
+        val addrs: List<InetAddress> = if (Build.VERSION.SDK_INT >= 34) serviceInfo.hostAddresses
+            else listOfNotNull(serviceInfo.host)
+        val v4 = addrs.firstOrNull { it is Inet4Address }?.hostAddress
+        val v6 = addrs.firstOrNull { it is Inet6Address }?.hostAddress?.let(PrinterAddress::stripZone)
+        val ip = v4 ?: v6 ?: return
         // Use RAW port 9100 for all types except _pdl-datastream which is already raw print.
         // For _pdl-datastream use the actual resolved port; for others default to 9100.
         val type = serviceInfo.serviceType ?: ""
@@ -180,13 +213,19 @@ class DiscoveryEngine(private val ctx: Context) {
                 port = port,
                 colorCapable = true,
                 source = PrinterSource.DISCOVERED,
-                model = "Network Printer"
+                model = "Network Printer",
+                ipv6 = v6.takeIf { v4 != null }
             ),
-            onFound
+            onFound,
+            named = true
         )
     }
 
     private fun stopNsdDiscovery() {
+        if (Build.VERSION.SDK_INT >= 34) {
+            val cbs = synchronized(infoCallbacks) { infoCallbacks.toList().also { infoCallbacks.clear() } }
+            for (cb in cbs) runCatching { nsdManager.unregisterServiceInfoCallback(cb) }
+        }
         try {
             if (multicastLock.isHeld) {
                 multicastLock.release()
@@ -213,7 +252,8 @@ class DiscoveryEngine(private val ctx: Context) {
     // Prong B — TCP port-9100 subnet scan
     // -------------------------------------------------------------------------
 
-    private val scanExecutor = Executors.newFixedThreadPool(48)
+    // Created per start(): stop() shuts it down, and a shut-down pool rejects new work.
+    private var scanExecutor: ExecutorService? = null
     private val scanFutures = mutableListOf<Future<*>>()
 
     private fun startTcpScan(onFound: (Printer) -> Unit) {
@@ -231,12 +271,13 @@ class DiscoveryEngine(private val ctx: Context) {
             return
         }
         val base = "${parts[0]}.${parts[1]}.${parts[2]}"
+        val executor = Executors.newFixedThreadPool(48).also { scanExecutor = it }
 
         synchronized(scanFutures) {
             for (i in 1..254) {
                 val ip = "$base.$i"
                 if (ip == ownIp || ip.endsWith(".0") || ip.endsWith(".255")) continue
-                val future = scanExecutor.submit {
+                val future = executor.submit {
                     if (stopped) return@submit
                     try {
                         Socket().use { sock ->
@@ -313,7 +354,8 @@ class DiscoveryEngine(private val ctx: Context) {
             for (f in scanFutures) f.cancel(true)
             scanFutures.clear()
         }
-        scanExecutor.shutdownNow()
+        scanExecutor?.shutdownNow()
+        scanExecutor = null
         Log.d(TAG, "[disc/scan] executor shut down")
     }
 
@@ -425,13 +467,23 @@ class DiscoveryEngine(private val ctx: Context) {
     // Shared reporting helper
     // -------------------------------------------------------------------------
 
-    /** Reports [printer] via [onFound] on the main thread if it hasn't been reported yet. */
-    private fun report(printer: Printer, onFound: (Printer) -> Unit) {
+    /**
+     * Reports [printer] via [onFound] on the main thread if it hasn't been reported yet.
+     * A [named] (mDNS) result for an address the subnet scan already reported is sent again
+     * with the same id, so the caller can replace "Printer (ip)" with the real name.
+     */
+    private fun report(printer: Printer, onFound: (Printer) -> Unit, named: Boolean = false) {
         val key = "${printer.ip}:${printer.port}"
-        if (reported.putIfAbsent(key, true) == null) {
-            Log.i(TAG, "[disc] new printer key=$key name=${printer.name} source=${printer.source}")
-            main.post { if (!stopped) onFound(printer) }
-        }
+        val sent = synchronized(reported) {
+            val prev = reported[key]
+            val merged = if (prev == null) printer else prev.copy(
+                name = if (named) printer.name else prev.name,
+                ipv6 = printer.ipv6 ?: prev.ipv6
+            )
+            if (merged == prev) null else merged.also { reported[key] = it }
+        } ?: return
+        Log.i(TAG, "[disc] printer key=$key name=${sent.name} ipv6=${sent.ipv6} source=${sent.source}")
+        main.post { if (!stopped) onFound(sent) }
     }
 
     // -------------------------------------------------------------------------
@@ -443,6 +495,22 @@ class DiscoveryEngine(private val ctx: Context) {
      * [onFound] is always invoked on the main thread; the same printer (by ip:port)
      * is reported at most once per session even if multiple prongs find it.
      */
+    /**
+     * The IPv6 address of the printer at [ipv4], from its mDNS records (no subnet scan, no
+     * broadcast to the scanner port). Blocking up to [timeoutMs]; null when it has none.
+     */
+    fun findIpv6(ipv4: String, timeoutMs: Long = 6000): String? {
+        val found = java.util.concurrent.LinkedBlockingQueue<String>()
+        stopped = false
+        reported.clear()
+        startNsdDiscovery { p -> if (p.ip == ipv4) p.ipv6?.let { found.offer(it) } }
+        return try {
+            found.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } finally {
+            stop()
+        }
+    }
+
     fun start(onFound: (Printer) -> Unit) {
         stopped = false
         reported.clear()

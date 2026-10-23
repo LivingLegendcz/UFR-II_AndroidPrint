@@ -74,7 +74,9 @@ data class PrinterCapabilities(
     val scanner: Boolean?,
     val adf: Boolean?,
     val snmp: Boolean,
-    val detectedAt: Long
+    val detectedAt: Long,
+    /** Model as the scanner side announces it (MFNP GET_ID "MDL:", e.g. "MF8000 Series"). */
+    val mdl: String? = null
 ) {
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -86,6 +88,7 @@ data class PrinterCapabilities(
         o.put("adf", adf ?: JSONObject.NULL)
         o.put("snmp", snmp)
         o.put("detectedAt", detectedAt)
+        mdl?.let { o.put("mdl", it) }
         val arr = JSONArray()
         for (i in inputs) {
             arr.put(
@@ -130,7 +133,8 @@ data class PrinterCapabilities(
                 scanner = if (o.isNull("scanner")) null else o.getBoolean("scanner"),
                 adf = if (o.isNull("adf")) null else o.getBoolean("adf"),
                 snmp = o.getBoolean("snmp"),
-                detectedAt = o.getLong("detectedAt")
+                detectedAt = o.getLong("detectedAt"),
+                mdl = o.optString("mdl").takeIf { it.isNotBlank() }
             )
         } catch (e: Exception) {
             null
@@ -216,11 +220,12 @@ object PrinterProbe {
         val inputMap = if (core != null) Snmp.get(ip, inputOids()) ?: emptyMap() else emptyMap()
         val id = mfnpIdentify(ip)
         val scanner: Boolean? = id?.let { it.contains("CLS:IMG", ignoreCase = true) }
+        val mdl = id?.let { Regex("MDL:([^;]+)").find(it)?.groupValues?.get(1)?.trim() }
 
         if (core == null) {
             return PrinterCapabilities(
                 sysDescr = null, model = null, color = null, inputs = emptyList(), duplex = null,
-                scanner = scanner, adf = null, snmp = false, detectedAt = System.currentTimeMillis()
+                scanner = scanner, adf = null, snmp = false, detectedAt = System.currentTimeMillis(), mdl = mdl
             )
         }
         val sysDescr = strOf(core, OID_SYS_DESCR)
@@ -235,7 +240,8 @@ object PrinterProbe {
             scanner = scanner,
             adf = null,
             snmp = true,
-            detectedAt = System.currentTimeMillis()
+            detectedAt = System.currentTimeMillis(),
+            mdl = mdl
         )
     }
 

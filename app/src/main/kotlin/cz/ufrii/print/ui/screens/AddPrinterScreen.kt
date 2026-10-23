@@ -29,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +43,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import cz.ufrii.print.PrinterAddress
 import cz.ufrii.print.R
 import cz.ufrii.print.status.PrinterCapabilities
 import cz.ufrii.print.ui.AppViewModel
@@ -56,7 +58,11 @@ import cz.ufrii.print.ui.theme.Ufr
 private val IPV4 = Regex("^((25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(25[0-5]|2[0-4]\\d|1?\\d?\\d)$")
 private val HOSTNAME = Regex("^[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
-fun isValidHost(s: String) = IPV4.matches(s) || (HOSTNAME.matches(s) && s.any { it.isLetter() })
+fun isValidHost(s: String) = IPV4.matches(s) || isIpv6(s) || (HOSTNAME.matches(s) && s.any { it.isLetter() })
+
+/** IPv6 literal, optionally with a zone ("fe80::1%wlan0" — link-local addresses need it). */
+fun isIpv6(s: String) =
+    ':' in s && android.net.InetAddresses.isNumericAddress(s.substringBefore('%'))
 
 /**
  * Přidat / upravit tiskárnu (§5 obrazovka 14): Název, IP, Port → "Otestovat spojení"
@@ -67,6 +73,7 @@ fun AddPrinterScreen(
     vm: AppViewModel,
     editId: String?,
     prefillIp: String?,
+    prefillIp6: String?,
     prefillName: String?,
     onDone: () -> Unit
 ) {
@@ -74,12 +81,18 @@ fun AddPrinterScreen(
     val existing = vm.printer(editId)
     var name by remember { mutableStateOf(existing?.name ?: prefillName ?: "") }
     var ip by remember { mutableStateOf(existing?.ip ?: prefillIp ?: "") }
+    var ip6 by remember { mutableStateOf(existing?.ipv6 ?: prefillIp6 ?: "") }
     var port by remember { mutableStateOf((existing?.port ?: 9100).toString()) }
     val probe by vm.probe.collectAsState()
 
     DisposableEffect(Unit) { onDispose { vm.resetProbe() } }
 
+    // The connection test looks up the printer's IPv6 (mDNS): fill the empty field with it.
+    LaunchedEffect(probe) {
+        (probe as? ProbeState.Reachable)?.ipv6?.let { if (ip6.isBlank()) ip6 = it }
+    }
     val ipValid = isValidHost(ip.trim())
+    val ip6Valid = ip6.isBlank() || isIpv6(ip6.trim())
     val portInt = port.toIntOrNull()?.takeIf { it in 1..65535 }
     val caps: PrinterCapabilities? = (probe as? ProbeState.Reachable)?.caps ?: existing?.capabilities
 
@@ -92,10 +105,14 @@ fun AddPrinterScreen(
             onBack = onDone, backIcon = Icons.Outlined.Close
         )
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Field(stringResource(R.string.field_name), name, { name = it }, placeholder = "Canon MF8030Cn")
-            Field(stringResource(R.string.field_ip), ip, { ip = it; vm.resetProbe() }, placeholder = "192.168.0.62",
+            Field(stringResource(R.string.field_name), name, { name = it }, placeholder = "Canon i-SENSYS")
+            Field(stringResource(R.string.field_ip), ip, { ip = it; vm.resetProbe() }, placeholder = "192.168.1.50",
                 mono = true, keyboard = KeyboardType.Uri,
                 error = if (ip.isNotBlank() && !ipValid) stringResource(R.string.field_ip_invalid) else null)
+            Field(stringResource(R.string.field_ip6), ip6, { ip6 = it }, placeholder = "fe80::…",
+                mono = true, keyboard = KeyboardType.Uri,
+                error = if (!ip6Valid) stringResource(R.string.field_ip6_invalid) else null)
+            Text(stringResource(R.string.field_ip6_note), style = Ufr.type.bodySmall, color = c.dim)
             Field(stringResource(R.string.field_port), port, { port = it.filter(Char::isDigit).take(5); vm.resetProbe() },
                 placeholder = "9100", mono = true, keyboard = KeyboardType.Number)
 
@@ -113,18 +130,19 @@ fun AddPrinterScreen(
             onClick = {
                 val p = AppViewModel.newPrinter(
                     name = name.ifBlank { caps?.model ?: ip.trim() },
-                    ip = ip.trim(), port = portInt ?: 9100, caps = caps, id = existing?.id
+                    ip = ip.trim(), port = portInt ?: 9100, caps = caps, id = existing?.id,
+                    ipv6 = ip6.trim().ifBlank { null }?.let(PrinterAddress::stripZone)
                 )
                 vm.savePrinter(p)
                 onDone()
             },
-            enabled = ipValid && portInt != null
+            enabled = ipValid && ip6Valid && portInt != null
         )
     }
 }
 
 @Composable
-private fun Field(
+fun Field(
     label: String,
     value: String,
     onChange: (String) -> Unit,

@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Print
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
@@ -60,7 +61,9 @@ fun PrintersScreen(
     vm: AppViewModel,
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
-    onAdd: (ip: String?, name: String?) -> Unit
+    /** null = empty form; a found printer pre-fills it. */
+    onAdd: (Printer?) -> Unit,
+    onImport: () -> Unit
 ) {
     val c = Ufr.colors
     val printers by vm.printers.collectAsState()
@@ -81,7 +84,7 @@ fun PrintersScreen(
             .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp)
     ) {
         HeaderBar(stringResource(R.string.printers_title), onBack = onBack) {
-            IconAction(Icons.Outlined.Add, stringResource(R.string.cd_add_printer), { onAdd(null, null) }, tint = c.ink)
+            IconAction(Icons.Outlined.Add, stringResource(R.string.cd_add_printer), { onAdd(null) }, tint = c.ink)
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (printers.isEmpty()) {
@@ -114,14 +117,14 @@ fun PrintersScreen(
                     found.forEachIndexed { i, p ->
                         ListRow(
                             title = p.name,
-                            subtitle = "${p.ip} · ${p.model}",
+                            subtitle = listOfNotNull(p.ip, p.ipv6, p.model).joinToString(" · "),
                             subtitleMono = true,
                             leading = { Icon(Icons.Outlined.Print, null, tint = c.mut, modifier = Modifier.size(22.dp)) },
                             trailing = {
                                 Text(stringResource(R.string.action_add),
                                     style = Ufr.type.labelSmall.copy(fontWeight = FontWeight.SemiBold), color = c.link,
                                     modifier = Modifier.clip(RoundedCornerShape(100.dp))
-                                        .clickable(role = Role.Button) { onAdd(p.ip, p.name) }
+                                        .clickable(role = Role.Button) { onAdd(p) }
                                         .padding(horizontal = 10.dp, vertical = 12.dp))
                             },
                             divider = i < found.lastIndex
@@ -134,7 +137,10 @@ fun PrintersScreen(
                 color = c.dim)
         }
         Spacer(Modifier.height(12.dp))
-        OutlineButton(stringResource(R.string.printers_manual), { onAdd(null, null) }, icon = Icons.Outlined.Keyboard,
+        OutlineButton(stringResource(R.string.printers_manual), { onAdd(null) }, icon = Icons.Outlined.Keyboard,
+            strong = true, height = 54.dp)
+        Spacer(Modifier.height(10.dp))
+        OutlineButton(stringResource(R.string.import_title), onImport, icon = Icons.Outlined.QrCodeScanner,
             strong = true, height = 54.dp)
     }
 }

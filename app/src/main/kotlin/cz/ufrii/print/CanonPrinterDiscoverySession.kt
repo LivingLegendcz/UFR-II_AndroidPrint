@@ -49,7 +49,7 @@ class CanonPrinterDiscoverySession(
         synchronized(printers) { printers.clear() }
         synchronized(idMap) { idMap.clear() }
 
-        // Seed with persisted manual printers (includes default Canon MF8030Cn)
+        // Seed with the printers the user saved
         val manual = PrinterStore.loadManual(service)
         synchronized(printers) {
             for (p in manual) {
@@ -59,6 +59,10 @@ class CanonPrinterDiscoverySession(
         Log.d(TAG, "[session] seeded ${manual.size} manual printers")
         publish()
 
+        // A saved printer is enough: no subnet scan every time the print dialog opens.
+        // A printer with a new IP is re-found on demand in the app (Tiskárny → Hledat).
+        if (manual.isNotEmpty()) return
+
         // Start dynamic discovery — callback fires on main thread (DiscoveryEngine contract)
         discoveryEngine.start { discovered ->
             // Manual entries win: skip if an ip:port already covered by a MANUAL printer
@@ -67,8 +71,9 @@ class CanonPrinterDiscoverySession(
                 printers.values.any { it.source == PrinterSource.MANUAL && "${it.ip}:${it.port}" == ipPort }
             }
             if (!alreadyCoveredByManual) {
+                // Same id again = the mDNS name for an address the subnet scan found first.
                 val added = synchronized(printers) {
-                    if (!printers.containsKey(discovered.id)) {
+                    if (printers[discovered.id] != discovered) {
                         printers[discovered.id] = discovered
                         true
                     } else false
@@ -188,6 +193,10 @@ class CanonPrinterDiscoverySession(
                 /* isDefault= */ true
             )
             .setColorModes(colorModes, defaultColorMode)
+            // MF8030Cn has no duplex unit: "long edge" is done as manual duplex (two passes,
+            // the user re-inserts the stack when the notification asks — see ManualDuplexJob).
+            .setDuplexModes(PrintAttributes.DUPLEX_MODE_NONE or PrintAttributes.DUPLEX_MODE_LONG_EDGE,
+                PrintAttributes.DUPLEX_MODE_NONE)
             // ~5 mm margins at 600 dpi: 5mm/25.4mm * 600dpi ≈ 118 thousandths-of-inch
             .setMinMargins(PrintAttributes.Margins(118, 118, 118, 118))
             .build()

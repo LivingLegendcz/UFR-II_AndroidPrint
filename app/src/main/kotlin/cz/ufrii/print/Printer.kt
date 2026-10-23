@@ -21,9 +21,15 @@ data class Printer(
     val port: Int = 9100,
     val colorCapable: Boolean = true,
     val source: PrinterSource = PrinterSource.MANUAL,
-    val model: String = "Canon MF8030Cn",
+    val model: String = "Canon",
     /** D1: what the device can do (SNMP + MFNP probe), null until "Otestovat spojení" ran. */
-    val capabilities: PrinterCapabilities? = null
+    val capabilities: PrinterCapabilities? = null,
+    /** The same machine's IPv6 (no zone): used when [ip] does not answer — see [PrinterAddress]. */
+    val ipv6: String? = null,
+    /** Driver description (PPD file in assets/ppd.zip); null = MF8000C, see [PpdCatalog]. */
+    val ppd: String? = null,
+    /** [ppd] was picked by the user — re-detection must not replace it. */
+    val ppdManual: Boolean = false
 )
 
 // ---------------------------------------------------------------------------
@@ -37,7 +43,6 @@ data class Printer(
  */
 object PrinterStore {
 
-    const val DEFAULT_IP   = "192.168.0.62"
     const val DEFAULT_PORT = 9100
 
     private const val PREFS_NAME = "canon_printers"
@@ -52,32 +57,10 @@ object PrinterStore {
     fun newManualId(): String = UUID.randomUUID().toString()
 
     /**
-     * Load persisted manual printers.
-     * Seed-on-first-run: if nothing is stored yet, creates and persists a
-     * default Canon MF8030Cn entry so callers always get at least one printer.
+     * Load persisted manual printers. A fresh install has none: the welcome screen
+     * (or the system dialog's discovery) finds the printer on the user's own network.
      */
-    fun loadManual(ctx: Context): List<Printer> {
-        val raw = prefs(ctx).getString(KEY_LIST, null)
-        val parsed = parseJson(raw)
-
-        if (parsed.isEmpty()) {
-            // First run — seed with default printer and persist it
-            val default = Printer(
-                id           = newManualId(),
-                name         = "Canon MF8030Cn (default)",
-                ip           = DEFAULT_IP,
-                port         = DEFAULT_PORT,
-                colorCapable = true,
-                source       = PrinterSource.MANUAL,
-                model        = "Canon MF8030Cn"
-            )
-            val seeded = listOf(default)
-            saveManual(ctx, seeded)
-            return seeded
-        }
-
-        return parsed
-    }
+    fun loadManual(ctx: Context): List<Printer> = parseJson(prefs(ctx).getString(KEY_LIST, null))
 
     /** Serialize [list] and commit to SharedPreferences. */
     fun saveManual(ctx: Context, list: List<Printer>) {
@@ -139,6 +122,9 @@ object PrinterStore {
             obj.put("colorCapable", p.colorCapable)
             obj.put("source",       p.source.name)
             obj.put("model",        p.model)
+            p.ipv6?.let { obj.put("ipv6", it) }
+            p.ppd?.let { obj.put("ppd", it) }
+            if (p.ppdManual) obj.put("ppdManual", true)
             p.capabilities?.let { obj.put("capabilities", it.toJson()) }
             arr.put(obj)
         }
@@ -167,9 +153,12 @@ object PrinterStore {
                     } catch (_: IllegalArgumentException) {
                         PrinterSource.MANUAL
                     }
-                    val model = obj.optString("model", "Canon MF8030Cn")
+                    val model = obj.optString("model", "Canon")
                     val caps = obj.optJSONObject("capabilities")?.let { PrinterCapabilities.fromJson(it) }
-                    result.add(Printer(id, name, ip, port, colorCapable, source, model, caps))
+                    val ipv6 = obj.optString("ipv6").takeIf { it.isNotBlank() }
+                    val ppd = obj.optString("ppd").takeIf { it.isNotBlank() }
+                    result.add(Printer(id, name, ip, port, colorCapable, source, model, caps, ipv6, ppd,
+                        obj.optBoolean("ppdManual")))
                 } catch (_: Exception) {
                     // Skip malformed entry
                 }
