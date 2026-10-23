@@ -41,9 +41,10 @@ class ProotLauncher(private val context: Context) {
         context.assets.open(assetPath).use { input ->
             FileOutputStream(destFile).use { output -> input.copyTo(output) }
         }
-        destFile.setReadable(true, false)
-        destFile.setWritable(true, false)
-        destFile.setExecutable(true, false)
+        // S6: owner-only — the guest runs under our app uid, no other uid needs access.
+        destFile.setReadable(true, true)
+        destFile.setWritable(true, true)
+        destFile.setExecutable(true, true)
         Log.i(TAG, "[extract] done assetPath=$assetPath dest=${destFile.absolutePath} size=${destFile.length()}")
     }
 
@@ -201,6 +202,7 @@ class ProotLauncher(private val context: Context) {
      * @param colorMode  Selects the CUPS options string passed as filter arg #5.
      * @param printerIp  Printer host.
      * @param port       Printer RAW port (9100).
+     * @param copies     Number of copies — passed verbatim as rastertoufr2 arg #4.
      * @param feed       Called on the feeder thread; should write raster bytes to
      *                   [OutputStream] and return when done (or throw on error).
      *                   The stream is wrapped in BufferedOutputStream; it is
@@ -210,6 +212,7 @@ class ProotLauncher(private val context: Context) {
         colorMode: ColorMode,
         printerIp: String,
         port: Int,
+        copies: Int,
         feed: (OutputStream) -> Unit
     ): String {
 
@@ -249,15 +252,15 @@ class ProotLauncher(private val context: Context) {
             "--link2symlink",
             "-w", "/",
             "/usr/lib/cups/filter/rastertoufr2",
-            "1",
-            "androiduser",
-            "androidprint",
-            "1",
+            "1",                              // job-id
+            "androiduser",                    // user
+            "androidprint",                   // title
+            copies.coerceAtLeast(1).toString(),  // copies (F2 — argv #4)
             optionsStr
         )
 
         Log.i(TAG, "[filter] cmd: ${cmd.joinToString(" ")}")
-        Log.i(TAG, "[filter] colorMode=$colorMode printer=$printerIp:$port")
+        Log.i(TAG, "[filter] colorMode=$colorMode printer=$printerIp:$port copies=$copies")
 
         val tStart = System.currentTimeMillis()
         return try {
@@ -359,7 +362,7 @@ class ProotLauncher(private val context: Context) {
                     socketResultMsg = "socket OK: $ufrBytesSent UFR-II bajtů odesláno na $printerIp:$port"
                     Log.i(TAG, "[filter] socket done ufr_bytes=$ufrBytesSent")
                 } catch (e: ConnectException) {
-                    socketResultMsg = "socket ConnectException: ${e.message}\n  >> Zkontroluj WiFi a IP tiskárny 192.168.0.62"
+                    socketResultMsg = "socket ConnectException: ${e.message}\n  >> Zkontroluj WiFi a IP tiskárny $printerIp"
                     Log.e(TAG, "[filter] socket connect failed: ${e.message}")
                     try { process.inputStream.close() } catch (_: Exception) {}
                 } catch (e: SocketTimeoutException) {
@@ -445,14 +448,14 @@ class ProotLauncher(private val context: Context) {
      */
     fun runProotFilter(
         rasterFile: File,
-        printerIp: String = "192.168.0.62",
-        port: Int = 9100
+        printerIp: String,
+        port: Int
     ): String {
         Log.i(TAG, "[filter] runProotFilter rasterFile=${rasterFile.absolutePath} printer=$printerIp:$port")
         if (!rasterFile.exists()) {
             return "FAIL: raster soubor nenalezen: ${rasterFile.absolutePath}"
         }
-        val result = runFilterPipeline(ColorMode.COLOR, printerIp, port) { out ->
+        val result = runFilterPipeline(ColorMode.COLOR, printerIp, port, copies = 1) { out ->
             rasterFile.inputStream().use { it.copyTo(out) }
         }
         return buildString {
@@ -468,18 +471,19 @@ class ProotLauncher(private val context: Context) {
     fun printPdf(
         pdfFd: ParcelFileDescriptor,
         colorMode: ColorMode,
-        printerIp: String = "192.168.0.62",
-        port: Int = 9100
+        printerIp: String,
+        port: Int,
+        copies: Int = 1
     ): String {
-        Log.i(TAG, "[filter] printPdf colorMode=$colorMode printer=$printerIp:$port")
-        val result = runFilterPipeline(colorMode, printerIp, port) { out ->
+        Log.i(TAG, "[filter] printPdf colorMode=$colorMode printer=$printerIp:$port copies=$copies")
+        val result = runFilterPipeline(colorMode, printerIp, port, copies) { out ->
             CupsRasterWriter(context).writePdf(out, pdfFd) { rowsDone ->
                 Log.d(TAG, "[raster] pdf rows=$rowsDone")
             }
         }
         return buildString {
             appendLine("=== TISK PDF (rastertoufr2) ===")
-            appendLine("colorMode=$colorMode  printer=$printerIp:$port")
+            appendLine("colorMode=$colorMode  printer=$printerIp:$port  copies=$copies")
             append(result)
         }
     }
@@ -490,11 +494,11 @@ class ProotLauncher(private val context: Context) {
     fun printImage(
         bitmap: Bitmap,
         colorMode: ColorMode,
-        printerIp: String = "192.168.0.62",
-        port: Int = 9100
+        printerIp: String,
+        port: Int
     ): String {
         Log.i(TAG, "[filter] printImage colorMode=$colorMode printer=$printerIp:$port")
-        val result = runFilterPipeline(colorMode, printerIp, port) { out ->
+        val result = runFilterPipeline(colorMode, printerIp, port, copies = 1) { out ->
             CupsRasterWriter(context).writeImage(out, bitmap) { rowsDone ->
                 Log.d(TAG, "[raster] image rows=$rowsDone")
             }

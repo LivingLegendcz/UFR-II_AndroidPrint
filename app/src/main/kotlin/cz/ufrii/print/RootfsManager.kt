@@ -129,10 +129,10 @@ class RootfsManager(private val context: Context) {
                             FileOutputStream(target).use { out ->
                                 tar.copyTo(out, bufferSize = 65536)
                             }
-                            // Nastavení permissions z tar mode
+                            // Nastavení permissions z tar mode (S6: owner-only — vše běží pod app uid)
                             val mode = entry.mode
-                            target.setReadable(true, false)
-                            target.setWritable(true, false)
+                            target.setReadable(true, true)
+                            target.setWritable(true, true)
                             // Executable bit (owner, group nebo others exec)
                             val isExecByMode = (mode and 0b001_000_000) != 0 ||
                                                (mode and 0b000_001_000) != 0 ||
@@ -144,7 +144,7 @@ class RootfsManager(private val context: Context) {
                                             entryName.startsWith("bin/") ||
                                             entryName.startsWith("usr/sbin/")
                             if (isExecByMode || forceExec) {
-                                target.setExecutable(true, false)
+                                target.setExecutable(true, true)
                             }
                             fileCount++
                         }
@@ -170,9 +170,9 @@ class RootfsManager(private val context: Context) {
                 dir.mkdirs()
                 Log.d(TAG, "[rootfs] created writable dir $relPath")
             }
-            dir.setWritable(true, false)
-            dir.setReadable(true, false)
-            dir.setExecutable(true, false)
+            dir.setWritable(true, true)
+            dir.setReadable(true, true)
+            dir.setExecutable(true, true)
         }
 
         // NOTE: /etc/ld.so.conf and /usr/lib/libjbig.so* symlinks are created by

@@ -106,6 +106,27 @@ ANDROID_HOME=~/android-sdk \
 
 Output: `app/build/outputs/apk/debug/app-debug.apk` (~102 MB).
 
+#### Release build (v1.1+ — distribute this, not debug)
+
+The release build is minified (R8) and **must be signed**. Create a keystore once (keep it
+OUTSIDE the repo) and put its credentials in `local.properties` (gitignored) or env vars:
+
+```bash
+keytool -genkeypair -v -keystore ~/canonprint-release.jks -alias canonprint \
+        -keyalg RSA -keysize 4096 -validity 10000
+```
+
+`local.properties`:
+```properties
+RELEASE_STORE_FILE=/home/you/canonprint-release.jks
+RELEASE_STORE_PASSWORD=...
+RELEASE_KEY_ALIAS=canonprint
+RELEASE_KEY_PASSWORD=...
+```
+
+Then: `./gradlew assembleRelease` → `app/build/outputs/apk/release/app-release.apk`.
+Without these keys the release build stays unsigned (debug build is unaffected).
+
 ### proot binaries
 
 The prebuilt proot `.so` files under `app/src/main/jniLibs/arm64-v8a/` were compiled from [green-green-avk/build-proot-android](https://github.com/green-green-avk/build-proot-android) with NDK r27, targeting `aarch64-linux-android29`, with `-Wl,-z,max-page-size=16384` for 16 KB page alignment. See [docs/12-jak-sestavit-apk.md](docs/12-jak-sestavit-apk.md) if you need to rebuild them.
@@ -130,11 +151,16 @@ Default printer address is `192.168.0.62:9100`. Edit or add printers via the pri
 
 ## Status
 
-**Working. v1.0, Phases 1 to 4 complete.**
+**Working. v1.1 — security hardening + functional fixes (code complete, on-device verification pending).**
+v1.0 (Phases 1–4) confirmed: physical color and monochrome printing via both the system print dialog
+and the share target on Samsung Galaxy S24+ / Android 16. Round-trip time ~2.2 s per page.
 
-Physical color and monochrome printing confirmed via both the system print dialog and the share target on Samsung Galaxy S24+ / Android 16. Round-trip time ~2.2 s per page.
+v1.1 adds: signed/minified release build, temp-file cleanup, HTTPS+SHA256 verified bundle build,
+owner-only rootfs permissions, and fixes for share/test printer routing (was hardcoded), copy count,
+EXIF photo rotation, and landscape page rotation. See [PROJECT-LOG.md](PROJECT-LOG.md).
 
-Remaining polish items: configurable printer IP in a settings screen, APK size reduction (strip model-irrelevant caepcm color data), multi-model Canon UFR-II support.
+Remaining polish items: APK size reduction (strip model-irrelevant caepcm color data), multi-model
+Canon UFR-II support, v1.3 UX items.
 
 ---
 
@@ -254,6 +280,27 @@ ANDROID_HOME=~/android-sdk \
 ```
 
 Výstup: `app/build/outputs/apk/debug/app-debug.apk` (~102 MB).
+
+#### Release build (v1.1+ — distribuujte tento, ne debug)
+
+Release build je minifikovaný (R8) a **musí být podepsaný**. Jednorázově vytvořte keystore
+(držte ho MIMO repo) a vložte přihlašovací údaje do `local.properties` (gitignored) nebo env proměnných:
+
+```bash
+keytool -genkeypair -v -keystore ~/canonprint-release.jks -alias canonprint \
+        -keyalg RSA -keysize 4096 -validity 10000
+```
+
+`local.properties`:
+```properties
+RELEASE_STORE_FILE=/home/vy/canonprint-release.jks
+RELEASE_STORE_PASSWORD=...
+RELEASE_KEY_ALIAS=canonprint
+RELEASE_KEY_PASSWORD=...
+```
+
+Pak: `./gradlew assembleRelease` → `app/build/outputs/apk/release/app-release.apk`.
+Bez těchto klíčů zůstane release build nepodepsaný (debug build to neovlivní).
 
 ### Binárky proot
 

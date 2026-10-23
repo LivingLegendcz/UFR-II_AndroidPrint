@@ -42,8 +42,13 @@ echo "=== [1/5] Extrakce Canon arm64 driveru ==="
 dpkg-deb -x "$DRIVER_ARM64_DEB" "$WORK_DIR/rootfs"
 echo "  ✓ Canon driver extrahován"
 
-echo "=== [2/5] Stažení arm64 runtime knihoven z Debian bookworm ==="
-DEB_MIRROR="http://ftp.debian.org/debian/pool/main"
+echo "=== [2/5] Stažení + ověření arm64 runtime knihoven z Debian bookworm ==="
+# S3: HTTPS mirror; každý balíček se ověří proti SHA256 PŘED rozbalením (fail-closed,
+#     dvoufázově: nejdřív stáhnout+ověřit vše, teprve pak rozbalit).
+# S7 (proces): při bumpu na novou +debXuY revizi aktualizuj VERZI v cestě níže
+#     I příslušný SHA256 v poli SHA256[]. 1× za čas zkontroluj Debian security tracker
+#     pro tyto balíčky (libxml2/icu mívají CVE pravidelně).
+DEB_MIRROR="https://ftp.debian.org/debian/pool/main"
 PACKAGES=(
   "g/glibc/libc6_2.36-9+deb12u14_arm64.deb"
   "g/gcc-12/libgcc-s1_12.2.0-14+deb12u1_arm64.deb"
@@ -59,7 +64,27 @@ PACKAGES=(
   "i/icu/libicu72_72.1-3+deb12u1_arm64.deb"
   "x/xz-utils/liblzma5_5.4.1-1_arm64.deb"
 )
+# SHA256 součty (klíč = jméno .deb). Doplň hodnoty z prvního ověřeného běhu
+# (skript je vypíše a fail-closed skončí, dokud nejsou doplněny).
+declare -A SHA256=(
+  ["libc6_2.36-9+deb12u14_arm64.deb"]="PENDING"
+  ["libgcc-s1_12.2.0-14+deb12u1_arm64.deb"]="PENDING"
+  ["libstdc++6_12.2.0-14+deb12u1_arm64.deb"]="PENDING"
+  ["libcups2_2.4.2-3+deb12u9_arm64.deb"]="PENDING"
+  ["libcupsimage2_2.4.2-3+deb12u9_arm64.deb"]="PENDING"
+  ["libjpeg62-turbo_2.1.5-2_arm64.deb"]="PENDING"
+  ["libjbig0_2.1-6.1_arm64.deb"]="PENDING"
+  ["libgcrypt20_1.10.1-3+deb12u1_arm64.deb"]="PENDING"
+  ["libgpg-error0_1.46-1_arm64.deb"]="PENDING"
+  ["zlib1g_1.2.13.dfsg-1_arm64.deb"]="PENDING"
+  ["libxml2_2.9.14+dfsg-1.3~deb12u5_arm64.deb"]="PENDING"
+  ["libicu72_72.1-3+deb12u1_arm64.deb"]="PENDING"
+  ["liblzma5_5.4.1-1_arm64.deb"]="PENDING"
+)
 mkdir -p "$WORK_DIR/debs"
+MISSING_HASH=0
+
+# --- Fáze 1: stáhnout a ověřit VŠE (nic se zatím nerozbaluje) ---
 for pkg in "${PACKAGES[@]}"; do
   name=$(basename "$pkg")
   echo "  Stahuji $name..."
@@ -67,8 +92,34 @@ for pkg in "${PACKAGES[@]}"; do
     echo "  CHYBA: nepodařilo se stáhnout $name"
     exit 1
   fi
+  got=$(sha256sum "$WORK_DIR/debs/$name" | awk '{print $1}')
+  want="${SHA256[$name]:-}"
+  if [ -z "$want" ] || [ "$want" = "PENDING" ]; then
+    echo "  ⚠ SHA256 pro $name není nastaven. Vypočtený: $got"
+    MISSING_HASH=1
+  elif [ "$want" != "$got" ]; then
+    echo "  CHYBA: SHA256 NESOUHLASÍ pro $name"
+    echo "      očekáváno: $want"
+    echo "      získáno:   $got"
+    exit 1
+  else
+    echo "  ✓ $name (SHA256 OK)"
+  fi
+done
+
+if [ "$MISSING_HASH" = "1" ]; then
+  echo ""
+  echo "CHYBA: některé SHA256 nejsou nastaveny (viz ⚠ výše)."
+  echo "       Doplň je do pole SHA256[] v tomto skriptu (hodnoty z 'Vypočtený:')"
+  echo "       a spusť skript znovu. Nic nebylo rozbaleno (fail-closed)."
+  exit 1
+fi
+
+# --- Fáze 2: rozbalit jen ověřené balíčky ---
+for pkg in "${PACKAGES[@]}"; do
+  name=$(basename "$pkg")
   dpkg-deb -x "$WORK_DIR/debs/$name" "$WORK_DIR/rootfs"
-  echo "  ✓ $name"
+  echo "  ✓ rozbaleno $name"
 done
 
 echo "=== [3/5] Oprava libcups (odstranění nepoužitých síťových závislostí) ==="

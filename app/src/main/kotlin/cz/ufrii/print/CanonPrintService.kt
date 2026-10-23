@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "CanonPrint"
 private const val LOG_MAX_BYTES = 256 * 1024L   // 256 KB cap for printservice.log
@@ -54,6 +55,14 @@ class CanonPrintService : PrintService() {
 
     // Active futures keyed by PrintJobId so cancellation can interrupt them
     private val activeFutures = ConcurrentHashMap<PrintJobId, Future<*>>()
+
+    // S2: per-job "claim" flag — whoever wins (worker start vs. cancel-before-start)
+    // owns closing the fd and deleting the spooled PDF. A FutureTask cancelled while
+    // still queued never runs, so its finally{} would never clean up.
+    private class JobClaim(val pfd: ParcelFileDescriptor) {
+        val taken = AtomicBoolean(false)
+    }
+    private val jobClaims = ConcurrentHashMap<PrintJobId, JobClaim>()
 
     // -------------------------------------------------------------------------
     // Persistent file logger — writes timestamped lines to printservice.log
@@ -93,6 +102,19 @@ class CanonPrintService : PrintService() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "[service] onCreate")
+
+        // S2: sweep orphaned printjob_*.pdf left by jobs that died before their
+        // finally-cleanup could run (e.g. process kill mid-print).
+        printExecutor.submit {
+            try {
+                cacheDir.listFiles { f -> f.name.startsWith("printjob_") && f.name.endsWith(".pdf") }
+                    ?.forEach { orphan ->
+                        if (orphan.delete()) Log.d(TAG, "[service] swept orphan ${orphan.name}")
+                    }
+            } catch (e: Exception) {
+                Log.w(TAG, "[service] orphan sweep failed (non-fatal): ${e.message}")
+            }
+        }
 
         // Pre-warm rootfs extraction in the background so the first print job
         // doesn't have to wait for it.  Failure here is non-fatal — the actual
@@ -150,7 +172,9 @@ class CanonPrintService : PrintService() {
         } else {
             ColorMode.COLOR
         }
-        svcLog("colorMode=$colorMode mediaSize=${attrs.mediaSize?.id}")
+        // Copies requested in the print dialog (F2) — PrintJobInfo.copies is >= 1.
+        val copies = printJob.info.copies.coerceAtLeast(1)
+        svcLog("colorMode=$colorMode mediaSize=${attrs.mediaSize?.id} copies=$copies")
 
         // 4. Media size validation (null → any size → allow through)
         val ms = attrs.mediaSize?.asPortrait()
@@ -179,18 +203,20 @@ class CanonPrintService : PrintService() {
         }
 
         // 7. Submit to single-thread executor
+        val claim = JobClaim(pfd)
+        jobClaims[jobId] = claim
         val future = printExecutor.submit {
+            // Cancel-before-start already claimed the job and cleaned up → nothing to do.
+            if (!claim.taken.compareAndSet(false, true)) return@submit
+            jobClaims.remove(jobId)
             // Clear any stale interrupt flag left on this shared single-thread worker by a
             // previously cancelled job — otherwise the new job's blocking I/O dies with
             // "read interrupted by closed() on another thread".
             Thread.interrupted()
             try {
-                Log.i(TAG, "[service] job=$jobId start print colorMode=$colorMode ip=${printer.ip}:${printer.port}")
-                svcLog("spouštím tisk → ${printer.ip}:${printer.port} colorMode=$colorMode")
-                val result = ProotLauncher(this).printPdf(pfd, colorMode, printer.ip, printer.port)
-                try { pfd.close() } catch (e: Exception) {
-                    Log.w(TAG, "[service] job=$jobId pfd.close failed: ${e.message}")
-                }
+                Log.i(TAG, "[service] job=$jobId start print colorMode=$colorMode ip=${printer.ip}:${printer.port} copies=$copies")
+                svcLog("spouštím tisk → ${printer.ip}:${printer.port} colorMode=$colorMode copies=$copies")
+                val result = ProotLauncher(this).printPdf(pfd, colorMode, printer.ip, printer.port, copies)
 
                 val ok = result.contains("exitCode=0") && result.contains("socket OK:")
                 val shortMsg = shortMsg(result)
@@ -219,15 +245,13 @@ class CanonPrintService : PrintService() {
                     }
                 }
             } catch (e: InterruptedException) {
-                // Cancelled via onRequestCancelPrintJob — close fd and bail
+                // Cancelled via onRequestCancelPrintJob — bail
                 Log.i(TAG, "[service] job=$jobId interrupted (cancelled)")
                 svcLog("job=$jobId interrupted (cancelled)")
-                try { pfd.close() } catch (_: Exception) {}
                 main.post { activeFutures.remove(jobId) }
             } catch (e: Exception) {
                 Log.e(TAG, "[service] job=$jobId exception: ${e.javaClass.simpleName}: ${e.message}")
                 svcLog("EXCEPTION job=$jobId ${e.javaClass.simpleName}: ${e.message}")
-                try { pfd.close() } catch (_: Exception) {}
                 val msg = "${e.javaClass.simpleName}: ${e.message}"
                 toast("UFR-II: výjimka — $msg")
                 main.post {
@@ -236,6 +260,13 @@ class CanonPrintService : PrintService() {
                         printJob.fail(msg)
                     }
                 }
+            } finally {
+                // S2: always close the fd and delete the spooled PDF — no document
+                // is left behind in cacheDir after the job finishes/fails/cancels.
+                try { pfd.close() } catch (e: Exception) {
+                    Log.w(TAG, "[service] job=$jobId pfd.close failed: ${e.message}")
+                }
+                runCatching { File(cacheDir, "printjob_${jobId}.pdf").delete() }
             }
         }
 
@@ -258,6 +289,14 @@ class CanonPrintService : PrintService() {
             // "read interrupted by closed() on another thread".
             future.cancel(false)
             Log.d(TAG, "[service] job=$jobId future.cancel(false) called (no interrupt)")
+        }
+        // S2: job still queued (worker never started) → its finally{} won't run,
+        // so close the fd and delete the spooled PDF here.
+        val claim = jobClaims.remove(jobId)
+        if (claim != null && claim.taken.compareAndSet(false, true)) {
+            runCatching { claim.pfd.close() }
+            runCatching { File(cacheDir, "printjob_${jobId}.pdf").delete() }
+            Log.d(TAG, "[service] job=$jobId cancelled before start — cleaned up")
         }
         printJob.cancel()
     }
@@ -296,7 +335,7 @@ class CanonPrintService : PrintService() {
             val pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
             Log.d(TAG, "[service] job=$jobId copied to seekable tmp=${tmp.absolutePath} size=${tmp.length()}")
             svcLog("PDF zkopírováno do ${tmp.name} (${tmp.length()} B) — seekovatelný fd")
-            tmp.deleteOnExit()
+            // S2: deleted in the print worker's finally block (deleteOnExit never fires on Android).
             pfd
         } catch (e: Exception) {
             Log.e(TAG, "[service] job=$jobId copy failed: ${e.message}")

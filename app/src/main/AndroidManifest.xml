@@ -11,6 +11,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:allowBackup="false"
         android:theme="@style/Theme.AppCompat.Light"
         android:extractNativeLibs="true">
 
@@ -39,6 +40,15 @@
             </intent-filter>
         </activity>
 
+        <!--
+            S4: launched internally from MainActivity (same UID) and by the system
+            Print framework as settingsActivity/addPrintersActivity (see
+            res/xml/print_service_capabilities.xml). Kept exported="true": Settings runs
+            as system UID, but the print dialog's "Add printer" is launched by
+            com.android.printspooler (own UID) → exported="false" would throw
+            SecurityException there. Risk is minimal: the activity reads no intent
+            extras (UI-only surface).
+        -->
         <activity
             android:name=".AddPrinterActivity"
             android:exported="true"

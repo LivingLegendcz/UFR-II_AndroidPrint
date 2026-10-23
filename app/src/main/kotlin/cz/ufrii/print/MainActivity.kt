@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -19,7 +20,9 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -155,10 +158,59 @@ class MainActivity : AppCompatActivity() {
             log("CHYBA: žádný soubor k tisku")
             return
         }
-        val isImage = pendingIsImage
-        val colorMode = selectedColorMode
+        pickPrinter { printer ->
+            startFileJob(uri, pendingIsImage, effectiveColorMode(printer), printer)
+        }
+    }
+
+    private fun doTestTisk() {
+        pickPrinter { printer -> startTestJob(effectiveColorMode(printer), printer) }
+    }
+
+    /**
+     * F1: Resolve which printer the share/test path should use.
+     * [PrinterStore.loadManual] seeds a default on first run, so the list is normally non-empty.
+     * One printer → used directly; multiple → a chooser dialog (defaults to first).
+     * Runs on the UI thread (invoked from a button click).
+     */
+    private fun pickPrinter(onChosen: (Printer) -> Unit) {
+        val printers = PrinterStore.loadManual(this)
+        when {
+            printers.isEmpty() ->
+                log("CHYBA: žádná uložená tiskárna. Přidejte ji přes 'Přidat / upravit tiskárnu'.")
+            printers.size == 1 -> onChosen(printers[0])
+            else -> {
+                // Disable buttons while the chooser is open — a second click would start a
+                // parallel job sharing print_input.tmp. Re-enabled on cancel; on choice the
+                // job itself keeps them busy until it finishes.
+                setBusy(true)
+                var chosen = false
+                val labels = printers.map { "${it.name} (${it.ip}:${it.port})" }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Vyberte tiskárnu")
+                    .setItems(labels) { _, which ->
+                        chosen = true
+                        onChosen(printers[which])
+                    }
+                    .setNegativeButton("Zrušit", null)
+                    .setOnDismissListener { if (!chosen) setBusy(false) }
+                    .show()
+            }
+        }
+    }
+
+    /** Downgrade COLOR → MONO when the chosen printer is mono-only. */
+    private fun effectiveColorMode(printer: Printer): ColorMode =
+        if (selectedColorMode == ColorMode.COLOR && !printer.colorCapable) {
+            log("Tiskárna '${printer.name}' je jen černobílá → tisknu MONO.")
+            ColorMode.MONO
+        } else {
+            selectedColorMode
+        }
+
+    private fun startFileJob(uri: Uri, isImage: Boolean, colorMode: ColorMode, printer: Printer) {
         setBusy(true)
-        log("\n--- TISK ZAHÁJEN (${if (isImage) "obrázek" else "PDF"}, $colorMode) ---")
+        log("\n--- TISK ZAHÁJEN (${if (isImage) "obrázek" else "PDF"}, $colorMode → ${printer.name} ${printer.ip}:${printer.port}) ---")
 
         Thread {
             try {
@@ -169,7 +221,6 @@ class MainActivity : AppCompatActivity() {
                     tmpFile.outputStream().use { out -> input.copyTo(out) }
                 } ?: run {
                     log("CHYBA: nelze otevřít vstupní stream z URI")
-                    setBusy(false)
                     return@Thread
                 }
                 log("Temp soubor: ${tmpFile.absolutePath} (${tmpFile.length()} B)")
@@ -193,36 +244,40 @@ class MainActivity : AppCompatActivity() {
                     val bmp = BitmapFactory.decodeFile(tmpFile.absolutePath, decOpts)
                         ?: run {
                             log("CHYBA: BitmapFactory vrátil null")
-                            setBusy(false)
                             return@Thread
                         }
-                    log("Bitmap dekódován: ${bmp.width}×${bmp.height}, tisknu...")
-                    val r = launcher.printImage(bmp, colorMode)
-                    bmp.recycle()
+                    // F3: honour EXIF orientation so phone photos print upright.
+                    val finalBmp = applyExifRotation(bmp, tmpFile)
+                    log("Bitmap dekódován: ${finalBmp.width}×${finalBmp.height}, tisknu...")
+                    val r = launcher.printImage(finalBmp, colorMode, printer.ip, printer.port)
+                    finalBmp.recycle()
                     r
                 } else {
                     val pfd = ParcelFileDescriptor.open(
                         tmpFile, ParcelFileDescriptor.MODE_READ_ONLY
                     )
                     log("PDF otevřeno, spouštím filtr...")
-                    val r = launcher.printPdf(pfd, colorMode)
-                    try { pfd.close() } catch (_: Exception) {}
-                    r
+                    try {
+                        launcher.printPdf(pfd, colorMode, printer.ip, printer.port)
+                    } finally {
+                        try { pfd.close() } catch (_: Exception) {}
+                    }
                 }
 
                 log("\nVÝSLEDEK:\n$result")
             } catch (e: Exception) {
                 log("\nVÝJIMKA:\n${stackTraceString(e)}")
             } finally {
+                // S2: don't leave the shared document in cache.
+                runCatching { File(cacheDir, "print_input.tmp").delete() }
                 setBusy(false)
             }
         }.start()
     }
 
-    private fun doTestTisk() {
-        val colorMode = selectedColorMode
+    private fun startTestJob(colorMode: ColorMode, printer: Printer) {
         setBusy(true)
-        log("\n--- TEST TISK ZAHÁJEN (vestavěné PDF, $colorMode) ---")
+        log("\n--- TEST TISK ZAHÁJEN (vestavěné PDF, $colorMode → ${printer.name} ${printer.ip}:${printer.port}) ---")
 
         Thread {
             try {
@@ -239,16 +294,52 @@ class MainActivity : AppCompatActivity() {
                 )
                 val launcher = ProotLauncher(this)
                 log("Spouštím rastertoufr2 filtr pod proot...")
-                val result = launcher.printPdf(pfd, colorMode)
-                try { pfd.close() } catch (_: Exception) {}
+                val result = try {
+                    launcher.printPdf(pfd, colorMode, printer.ip, printer.port)
+                } finally {
+                    try { pfd.close() } catch (_: Exception) {}
+                }
 
                 log("\nVÝSLEDEK:\n$result")
             } catch (e: Exception) {
                 log("\nVÝJIMKA:\n${stackTraceString(e)}")
             } finally {
+                // S2: remove the test temp file.
+                runCatching { File(cacheDir, "sample_test.tmp").delete() }
                 setBusy(false)
             }
         }.start()
+    }
+
+    /**
+     * F3: Reads EXIF orientation from [file] and returns a re-oriented bitmap.
+     * Returns [bmp] unchanged (and not recycled) when no rotation is needed or on error.
+     * When a rotated copy is produced, the original [bmp] is recycled.
+     */
+    private fun applyExifRotation(bmp: Bitmap, file: File): Bitmap {
+        return try {
+            val orientation = ExifInterface(file.absolutePath).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+            )
+            val matrix = Matrix()
+            when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.postScale(-1f, 1f) }
+                else -> return bmp  // NORMAL / UNDEFINED — nothing to do
+            }
+            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+            if (rotated != bmp) bmp.recycle()
+            Log.i(TAG, "[main] EXIF orientation=$orientation applied")
+            rotated
+        } catch (e: Exception) {
+            Log.w(TAG, "[main] EXIF rotation failed (using original): ${e.message}")
+            bmp
+        }
     }
 
     private fun doDiag() {

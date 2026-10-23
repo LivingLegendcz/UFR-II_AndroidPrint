@@ -204,26 +204,36 @@ class CupsRasterWriter(context: Context) {
 
             for (pageIndex in 0 until pageCount) {
                 renderer.openPage(pageIndex).use { page ->
+                    // F4: landscape pages are rotated 90° to fill the portrait canvas
+                    // instead of being letterboxed down to ~70 %.
+                    val landscape = page.width > page.height
                     Log.d(TAG, "[raster] rendering pdf page $pageIndex/${pageCount-1} " +
-                               "pdfW=${page.width} pdfH=${page.height}")
+                               "pdfW=${page.width} pdfH=${page.height} landscape=$landscape")
 
-                    // Compute uniform scale so the whole PDF page fits within CUPS canvas.
-                    val scaleX = CUPS_WIDTH.toFloat()  / page.width
-                    val scaleY = CUPS_HEIGHT.toFloat() / page.height
-                    val scale  = minOf(scaleX, scaleY)
+                    // Effective (post-rotation) content dimensions in page units.
+                    val effW = if (landscape) page.height else page.width
+                    val effH = if (landscape) page.width  else page.height
+
+                    // Uniform scale so the (possibly rotated) page fits within CUPS canvas.
+                    val scale = minOf(CUPS_WIDTH.toFloat() / effW, CUPS_HEIGHT.toFloat() / effH)
 
                     // Center the scaled content on the canvas.
-                    val scaledW = page.width  * scale
-                    val scaledH = page.height * scale
-                    val offsetX = (CUPS_WIDTH  - scaledW) / 2f
-                    val offsetY = (CUPS_HEIGHT - scaledH) / 2f
+                    val offsetX = (CUPS_WIDTH  - effW * scale) / 2f
+                    val offsetY = (CUPS_HEIGHT - effH * scale) / 2f
 
                     writePage(out, pageIndex = pageIndex, renderBand = { bandTop, _, bitmap ->
                         val bandIndex = bandTop / BAND_ROWS
-                        // Matrix: scale the PDF, translate so only the current band is
-                        // drawn at (0,0) in the bitmap.
+                        // Matrix: (rotate 90° for landscape) → scale → translate so only the
+                        // current band is drawn at (0,0) in the bitmap.
                         val matrix = Matrix().apply {
-                            setScale(scale, scale)
+                            if (landscape) {
+                                // 90° CW maps (x,y)→(-y,x); shift +page.height back into +x.
+                                setRotate(90f)
+                                postTranslate(page.height.toFloat(), 0f)
+                                postScale(scale, scale)
+                            } else {
+                                setScale(scale, scale)
+                            }
                             postTranslate(offsetX, offsetY - bandTop)
                         }
                         // Fill white background for this band.
@@ -267,24 +277,32 @@ class CupsRasterWriter(context: Context) {
     ) {
         writeStreamHeader(out)
 
-        Log.d(TAG, "[raster] writeImage srcW=${bitmap.width} srcH=${bitmap.height}")
+        // F4: rotate wide (landscape/panorama) images 90° to fill the portrait canvas.
+        val landscape = bitmap.width > bitmap.height
+        Log.d(TAG, "[raster] writeImage srcW=${bitmap.width} srcH=${bitmap.height} landscape=$landscape")
+
+        // Effective (post-rotation) dimensions.
+        val effW = if (landscape) bitmap.height else bitmap.width
+        val effH = if (landscape) bitmap.width  else bitmap.height
 
         // Uniform scale to fit within CUPS canvas.
-        val scaleX = CUPS_WIDTH.toFloat()  / bitmap.width
-        val scaleY = CUPS_HEIGHT.toFloat() / bitmap.height
-        val scale  = minOf(scaleX, scaleY)
+        val scale = minOf(CUPS_WIDTH.toFloat() / effW, CUPS_HEIGHT.toFloat() / effH)
 
-        val scaledW = bitmap.width  * scale
-        val scaledH = bitmap.height * scale
-        val offsetX = (CUPS_WIDTH  - scaledW) / 2f
-        val offsetY = (CUPS_HEIGHT - scaledH) / 2f
+        val offsetX = (CUPS_WIDTH  - effW * scale) / 2f
+        val offsetY = (CUPS_HEIGHT - effH * scale) / 2f
 
         writePage(out, renderBand = { bandTop, _, bandBitmap ->
             val canvas = Canvas(bandBitmap)
             canvas.drawColor(Color.WHITE)
 
             val matrix = Matrix().apply {
-                setScale(scale, scale)
+                if (landscape) {
+                    setRotate(90f)
+                    postTranslate(bitmap.height.toFloat(), 0f)
+                    postScale(scale, scale)
+                } else {
+                    setScale(scale, scale)
+                }
                 postTranslate(offsetX, offsetY - bandTop)
             }
             canvas.drawBitmap(bitmap, matrix, null)
