@@ -27,11 +27,8 @@ if [ ! -x "$PREFIX/bin/scanimage" ]; then
   rm -rf "$SRC" && mkdir "$SRC" && tar -xzf sb.tar.gz -C "$SRC" --strip-components=1
   cd "$SRC"
 
-  # The patch: device reports MDL "MF8000 Series" over the network, table only knows "MF8030".
-  # Same PID → generation-2 imageCLASS code path. PIXMA_CAP_ADF: the unit has a document feeder.
-  sed -i '/"MF8030", MF8030_PID/a\  DEV ("Canon i-SENSYS MF8000 Series", "MF8000", MF8030_PID, 600, 0, 640, 877, PIXMA_CAP_ADF),' \
-    backend/pixma/pixma_imageclass.c
-  grep -q '"MF8000"' backend/pixma/pixma_imageclass.c
+  # MF8000 patches (model alias + ADF, stale-session recovery, jam watchdog) — see docs/20
+  python3 -I "$(dirname "$(readlink -f "$0")")/sane-patch-mf8000.py" "$SRC"
 
   ./configure --prefix="$PREFIX" BACKENDS=pixma --disable-locking \
     --without-usb --without-snmp --without-avahi > "$WORK/configure.log" 2>&1

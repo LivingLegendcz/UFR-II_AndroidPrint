@@ -60,7 +60,7 @@ SANE (1.4.0) chybu **ignoruje**, pokračuje se session 0 a první TCP SEND dosta
 
 **Odblokování (ověřeno):** poslat UDP `CLOSE` pro visící relaci (ID 1):
 `4d464e50 02 11 0000 <seq> 0001 00000000` → tiskárna odpoví `82 11 0000 … 0001` a další sken projde.
-→ **Do patche:** v `bjnp_send_job_details` při chybě ≠ 0 poslat `CLOSE` (session 1) a JOB_DETAILS zopakovat.
+→ **V patchi** (`scripts/sane-patch-mf8000.py`, patch 2): při chybě ≠ 0 `CLOSE` session 1 + JOB_DETAILS znovu. Ověřeno.
 
 ### ✅ Podavač (ADF) — kus podavač MÁ
 Skutečný kus má ADF (v docs/09 chybně „bez ADF"). S `PIXMA_CAP_ADF` v patchi SANE nabídne
@@ -103,7 +103,11 @@ port ~2 týdny; má smysl jen kdyby proot cesta na telefonu narazila.
 
 - [x] ~~ADF~~ → kus má podavač, sken z ADF ověřen (1 i 2 strany).
 - [x] ~~Víc skenů za sebou~~ → ano, Remote Scanner drží (Waiting/Online).
-- [ ] Patch SANE: (1) JOB_DETAILS chyba `8502` → `CLOSE` + retry, (2) detekce zaseknutého papíru / timeout bez dat.
+- [x] ~~Patch SANE~~ → [`scripts/sane-patch-mf8000.py`](../scripts/sane-patch-mf8000.py) (idempotentní, na čistý 1.4.0):
+  (1) alias MF8000 + `PIXMA_CAP_ADF`, (2) JOB_DETAILS status ≠ 0 → `CLOSE` session 1 + retry
+  — **ověřeno živě** (úmyslně visící relace → `job refused (0x8502)` → close → retry OK),
+  (3) watchdog: 30 s bez obrazových dat → `PIXMA_EPAPER_JAMMED` (ADF) / `ETIMEDOUT` — zkompilováno, **živě neověřeno** (chce zaseknutí).
+- [ ] Remote Scanner **sám vyprší** (po nějaké době nečinnosti → `EBUSY`). Změřit timeout; v appce při EBUSY výzva „Zapněte znovu Remote Scanner".
 - [ ] Zjistit, co přesně zablokovalo relaci po 1. úspěšném skenu (`--help` vs. holé TCP sondy) — appka nedělá ani jedno.
 - [ ] Ověřit 300/600 dpi a režim Gray (rychlost, artefakty).
 - [ ] Jak dlouho drží „Remote Scanner" (timeout na panelu?).

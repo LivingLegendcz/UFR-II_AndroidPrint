@@ -34,9 +34,5 @@ for proto, port in ((b"MFNP", 8610), (b"BJNP", 8612), (b"BJNP", 8611)):
         finally:
             s.close()
 
-for port in (8610, 8612):
-    c = socket.socket()
-    c.settimeout(2)
-    r = c.connect_ex((ip, port))
-    print(f"TCP {port}: {'OPEN' if r == 0 else 'closed/filtered (%s)' % r}")
-    c.close()
+# No raw TCP connect to 8610: an unclosed TCP session is a suspect for wedging the scanner
+# (docs/20, Gotcha 3). UDP DISCOVER/GET_ID is enough to tell whether the scanner is alive.
