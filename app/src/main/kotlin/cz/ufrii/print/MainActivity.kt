@@ -26,6 +26,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         AppSettings.load(this)
+        JobHistory.load(this)
+        Notifications.ensureChannels(this)
+        if (AppSettings.statusNotify.value) StatusWorker.schedule(this, true)
+        // Fresh start: nothing can still be using scans from an earlier run.
+        if (savedInstanceState == null) Thread { ScanJobs.sweep(applicationContext, 60 * 60_000L) }.start()
         Log.i(TAG, "[main] onCreate intent=${intent?.action}")
         if (savedInstanceState == null) handleIntent(intent)
         setContent { UfrApp(vm, Routes.HOME, onExit = ::finish) }
@@ -50,7 +55,9 @@ class MainActivity : ComponentActivity() {
                 val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
                 if (uri != null) vm.setPending(uri, intent.type) else AppLog.err("ACTION_SEND bez EXTRA_STREAM")
             }
-            Intent.ACTION_VIEW -> intent.data?.let { vm.setPending(it, intent.type) }
+            Intent.ACTION_VIEW -> intent.data?.let {
+                if (it.scheme == SettingsShare.SCHEME) vm.setImportLink(it.toString()) else vm.setPending(it, intent.type)
+            }
         }
     }
 }

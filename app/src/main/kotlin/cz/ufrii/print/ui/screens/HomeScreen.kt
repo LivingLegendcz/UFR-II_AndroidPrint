@@ -20,12 +20,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.DocumentScanner
+import androidx.compose.material.icons.outlined.Scanner
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Print
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.UploadFile
@@ -70,7 +77,10 @@ fun HomeScreen(
     vm: AppViewModel,
     onSettings: () -> Unit,
     onPrinter: (String?) -> Unit,
-    onLog: () -> Unit
+    onLog: () -> Unit,
+    onPrint: () -> Unit,
+    onScan: () -> Unit,
+    onHistory: () -> Unit
 ) {
     val ctx = LocalContext.current
     val c = Ufr.colors
@@ -81,7 +91,6 @@ fun HomeScreen(
     val mode by AppSettings.defaultMode.collectAsState()
     val pending by vm.pending.collectAsState()
     val unsupported by vm.unsupported.collectAsState()
-    var scanInfo by remember { mutableStateOf(false) }
     val job by vm.job.collectAsState()
 
     val printer = printers.firstOrNull { it.id == defaultId } ?: printers.firstOrNull()
@@ -94,11 +103,8 @@ fun HomeScreen(
         if (uri != null) vm.setPending(uri, ctx.contentResolver.getType(uri))
     }
 
-    Column(
-        Modifier.fillMaxSize().background(c.bg).statusBarsPadding().navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp)
-    ) {
+    // Landscape / tablet: printer on the left, actions on the right, each scrolling on its own.
+    val top: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Logo(Modifier.weight(1f))
             IconAction(Icons.Outlined.Tune, stringResource(R.string.cd_settings), onSettings)
@@ -117,10 +123,11 @@ fun HomeScreen(
             onSelect = { AppSettings.setDefaultMode(ctx, it) },
             colorAvailable = colorAvailable
         )
-
+    }
+    val actions: @Composable () -> Unit = {
         Spacer(Modifier.height(16.dp))
         when (val j = job) {
-            is JobState.Running -> JobRunningCard(j.title)
+            is JobState.Running -> JobRunningCard(j, onCancel = vm::cancelJob)
             is JobState.Done -> JobDoneCard(j, onDismiss = vm::dismissJob, onLog = onLog)
             JobState.Idle -> {}
         }
@@ -141,7 +148,7 @@ fun HomeScreen(
                 name = p.name,
                 isImage = p.isImage,
                 enabled = printer != null && !busy,
-                onPrint = { vm.printPending(if (colorAvailable) mode else cz.ufrii.print.ColorMode.MONO) },
+                onPrint = onPrint,
                 onClear = vm::clearPending
             )
             Spacer(Modifier.height(10.dp))
@@ -152,26 +159,44 @@ fun HomeScreen(
                 picker.launch(arrayOf("*/*"))
             }
             ActionCard(
-                icon = Icons.Outlined.DocumentScanner,
+                icon = Icons.Outlined.Scanner,
                 text = stringResource(R.string.home_scan),
                 sub = stringResource(R.string.home_scan_sub),
                 enabled = true
-            ) { scanInfo = true }
+            ) { onScan() }
             ActionCard(
                 icon = Icons.Outlined.CheckCircle,
                 text = stringResource(R.string.home_test_page),
                 enabled = printer != null && !busy
             ) { vm.printTestPage(if (colorAvailable) mode else cz.ufrii.print.ColorMode.MONO) }
+            ActionCard(
+                icon = Icons.Outlined.History,
+                text = stringResource(R.string.history_title),
+                enabled = true
+            ) { onHistory() }
         }
     }
-
-    if (scanInfo) {
-        AlertDialog(
-            onDismissRequest = { scanInfo = false },
-            title = { Text(stringResource(R.string.home_scan)) },
-            text = { Text(stringResource(R.string.scan_coming)) },
-            confirmButton = { TextButton({ scanInfo = false }) { Text("OK", color = c.ink) } }
-        )
+    BoxWithConstraints(Modifier.fillMaxSize().background(c.bg)) {
+        if (maxWidth >= 720.dp) {
+            Row(
+                Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                    .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+                    .padding(start = 24.dp, end = 24.dp, top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(28.dp)
+            ) {
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) { top() }
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 56.dp, bottom = 24.dp)) { actions() }
+            }
+        } else {
+            Column(
+                Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp)
+            ) {
+                top()
+                actions()
+            }
+        }
     }
 }
 
@@ -257,7 +282,7 @@ private fun PendingFileCard(name: String, isImage: Boolean, enabled: Boolean, on
 }
 
 @Composable
-private fun JobRunningCard(title: String) {
+private fun JobRunningCard(j: JobState.Running, onCancel: () -> Unit) {
     val c = Ufr.colors
     val shape = RoundedCornerShape(20.dp)
     Row(
@@ -266,10 +291,19 @@ private fun JobRunningCard(title: String) {
     ) {
         Spinner(size = 20.dp)
         Spacer(Modifier.width(14.dp))
-        Column {
+        val waiting by cz.ufrii.print.StallRetry.waiting.collectAsState()
+        Column(Modifier.weight(1f)) {
             Text(stringResource(R.string.job_printing), style = Ufr.type.label.copy(fontWeight = FontWeight.SemiBold), color = c.ink)
-            Text(title, style = Ufr.type.dataSmall, color = c.dim)
+            if (waiting != null) {
+                Text(stringResource(R.string.scanmode_text), style = Ufr.type.bodySmall, color = c.errTx)
+            }
+            Text(listOfNotNull(j.title, j.pass?.let { stringResource(R.string.print_pass, it) },
+                if (j.total > 0) stringResource(R.string.print_page_of, j.page + 1, j.total) else null).joinToString(" · "),
+                style = Ufr.type.dataSmall, color = c.dim)
         }
+        Text(stringResource(R.string.action_cancel), style = Ufr.type.label.copy(fontWeight = FontWeight.SemiBold),
+            color = c.err, modifier = Modifier.clip(RoundedCornerShape(100.dp)).clickable(role = Role.Button, onClick = onCancel)
+                .padding(horizontal = 12.dp, vertical = 10.dp))
     }
     Spacer(Modifier.height(10.dp))
 }

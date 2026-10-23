@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scan results (sken-*.pdf / .jpg / .png) shared from cacheDir/scan-out. -->
+<paths>
+    <cache-path name="scan" path="scan-out/" />
+</paths>

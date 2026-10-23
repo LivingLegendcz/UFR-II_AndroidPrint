@@ -32,8 +32,8 @@ android {
         applicationId = "cz.ufrii.print"
         minSdk = 29
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.2.0-d1b"
+        versionCode = 17
+        versionName = "1.3.0"
     }
 
     signingConfigs {
@@ -109,6 +109,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // Printer setup sharing: QR generation (zxing) and scanning via Google's code scanner
+    // (no camera permission; runs in Play services).
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.ui:ui-tooling-preview")
 

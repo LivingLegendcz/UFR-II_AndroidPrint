@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="UFR-II"
@@ -14,6 +15,11 @@
         android:allowBackup="false"
         android:theme="@style/Theme.Ufr"
         android:extractNativeLibs="true">
+
+        <!-- QR scanning (Google code scanner): download its UI module with the app, not on first use. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
 
         <activity
             android:name=".MainActivity"
@@ -38,6 +44,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
+            <!-- Shared printer setup (QR / link): ufrprint://import?d=… -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="ufrprint" android:host="import" />
+            </intent-filter>
         </activity>
 
         <!--
@@ -53,6 +66,28 @@
             android:name=".AddPrinterActivity"
             android:exported="true"
             android:label="UFR-II — tiskárny" />
+
+        <!-- "More options" of the system print dialog (paper source). Launched by
+             com.android.printspooler (own UID) → must be exported, like AddPrinterActivity.
+             Reads only the PrintJobInfo/PrinterInfo the spooler passes in. -->
+        <activity
+            android:name=".PrintOptionsActivity"
+            android:exported="true"
+            android:label="UFR-II" />
+
+        <receiver
+            android:name=".DuplexActionReceiver"
+            android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <service
             android:name=".CanonPrintService"

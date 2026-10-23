@@ -22,6 +22,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Scanner
+import androidx.compose.material.icons.outlined.Print
+import androidx.compose.material.icons.outlined.QrCode2
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
@@ -69,7 +72,10 @@ fun PrinterDetailScreen(
     vm: AppViewModel,
     id: String,
     onBack: () -> Unit,
-    onEdit: (String) -> Unit
+    onEdit: (String) -> Unit,
+    onCalibrate: (String) -> Unit,
+    onShare: (String) -> Unit,
+    onDriver: (String) -> Unit
 ) {
     val c = Ufr.colors
     val ctx = LocalContext.current
@@ -130,6 +136,34 @@ fun PrinterDetailScreen(
             )
         } else Text(stringResource(R.string.detail_caps_unknown), style = Ufr.type.bodySmall, color = c.dim)
 
+        // --- Addresses -------------------------------------------------------
+        Overline(stringResource(R.string.detail_addresses), Modifier.padding(top = 26.dp, bottom = 10.dp))
+        UfrCard {
+            val v4 = printer.ip.takeIf { !cz.ufrii.print.PrinterAddress.isIpv6(it) }
+            val v6 = printer.ipv6 ?: printer.ip.takeIf { cz.ufrii.print.PrinterAddress.isIpv6(it) }
+            ListRow("IPv4", trailing = { ValueText(v4?.let { "$it:${printer.port}" } ?: stringResource(R.string.detail_addr_none), mono = true) })
+            ListRow("IPv6", subtitle = if (v6 == null) stringResource(R.string.detail_addr_v6_hint) else null,
+                trailing = { ValueText(v6 ?: stringResource(R.string.detail_addr_none), mono = true) }, divider = false)
+        }
+
+        // --- Driver (PPD) ------------------------------------------------------
+        Overline(stringResource(R.string.detail_driver), Modifier.padding(top = 26.dp, bottom = 10.dp))
+        val ppd = cz.ufrii.print.PpdCatalog.forPrinter(ctx, printer)
+        UfrCard {
+            ListRow(
+                ppd.nick ?: ppd.short,
+                subtitle = stringResource(when {
+                    printer.ppdManual -> R.string.detail_driver_manual
+                    printer.ppd != null -> R.string.detail_driver_auto
+                    else -> R.string.detail_driver_default
+                }) + " · " + stringResource(if (cz.ufrii.print.PpdCatalog.autoDuplex(ctx, printer)) R.string.detail_driver_duplex
+                    else R.string.detail_driver_no_duplex),
+                trailing = { Text(stringResource(R.string.detail_driver_change), style = Ufr.type.label, color = c.link) },
+                divider = false,
+                onClick = { onDriver(id) }
+            )
+        }
+
         Spacer(Modifier.height(24.dp))
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (printer.id != defaultId) {
@@ -145,6 +179,38 @@ fun PrinterDetailScreen(
             } else {
                 OutlineButton(stringResource(R.string.detail_redetect), { vm.redetect(id) })
             }
+            // Tests: one page (mode from Home), and the scanner answering over the network.
+            val job by vm.job.collectAsState()
+            val scanTest by vm.scannerTest.collectAsState()
+            val mode by cz.ufrii.print.AppSettings.defaultMode.collectAsState()
+            val printing = job is cz.ufrii.print.ui.JobState.Running
+            if (printing) {
+                OutlineButton(stringResource(R.string.detail_test_print_cancel), vm::cancelJob, destructive = true)
+            } else {
+                // A test shows everything the printer can do: colour when it has it.
+                OutlineButton(stringResource(R.string.detail_test_print), { vm.printTestPage(cz.ufrii.print.ColorMode.COLOR, id) },
+                    icon = Icons.Outlined.Print)
+            }
+            (job as? cz.ufrii.print.ui.JobState.Done)?.let { d ->
+                Text(if (d.result.ok) stringResource(R.string.detail_test_print_ok) else d.result.message,
+                    style = Ufr.type.bodySmall, color = if (d.result.ok) c.ok else c.errTx)
+            }
+            val st = scanTest[id]
+            OutlineButton(stringResource(if (st == AppViewModel.ScannerTest.Running) R.string.detail_test_scanner_running
+                else R.string.detail_test_scanner), { vm.testScanner(id) }, icon = Icons.Outlined.Scanner,
+                enabled = st != AppViewModel.ScannerTest.Running)
+            when (st) {
+                is AppViewModel.ScannerTest.Ok -> Text(stringResource(R.string.detail_test_scanner_ok,
+                    st.caps.device ?: "?",
+                    st.caps.sources.map { if (it == cz.ufrii.print.ScanSource.GLASS) stringResource(R.string.scan_glass) else stringResource(R.string.cap_adf) }.joinToString(),
+                    "${st.caps.resolutions.first()}–${st.caps.resolutions.last()}"),
+                    style = Ufr.type.bodySmall, color = c.ok)
+                AppViewModel.ScannerTest.Failed -> Text(stringResource(R.string.detail_test_scanner_failed),
+                    style = Ufr.type.bodySmall, color = c.errTx)
+                else -> {}
+            }
+            OutlineButton(stringResource(R.string.calib_title), { onCalibrate(id) })
+            OutlineButton(stringResource(R.string.share_title), { onShare(id) }, icon = Icons.Outlined.QrCode2)
             OutlineButton(stringResource(R.string.detail_remove), { confirmRemove = true }, destructive = true)
         }
     }
